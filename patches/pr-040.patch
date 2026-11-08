@@ -1,0 +1,504 @@
+diff --git a/product/.env.example b/product/.env.example
+index d32ec6d..b944f05 100644
+--- a/product/.env.example
++++ b/product/.env.example
+@@ -4,6 +4,21 @@ APP_DATA_MODE=real
+ COMPANY_DATA_MODE=real
+ CONTRACT_DATA_MODE=real
+ 
++# 인증·커뮤니티·신고는 실제 DB 연결 작업이 끝나기 전까지 mock을 명시합니다.
++# 이 두 줄을 지우면 APP_DATA_MODE=real을 따라가 로그인이 503으로 실패합니다.
++AUTH_DATA_MODE=mock
++COMMUNITY_DATA_MODE=mock
++
++# 현장 제보는 저장소 설계가 끝나지 않았습니다 — 반드시 mock을 명시합니다.
++# 생략하면 APP_DATA_MODE=real을 따라가고, 실제 저장소가 없어
++# 제보 접수·조회가 전부 503으로 실패합니다(Mock 성공으로 위장하지 않는 설계).
++WORKSITE_TIP_DATA_MODE=mock
++
++# mock 인증 계정의 비밀번호입니다. AUTH_DATA_MODE=mock 일 때만 사용합니다.
++MOCK_AUTH_USER_PASSWORD=
++MOCK_AUTH_ADMIN_PASSWORD=
++MOCK_AUTH_INSPECTOR_PASSWORD=
++
+ # 실제 모드에서는 읽기 전용 PostgreSQL 계정만 사용합니다.
+ # 권장: 읽기 전용 연결 문자열을 직접 지정합니다. 비밀값은 커밋하지 않습니다.
+ BOT_DATABASE_URL=
+@@ -13,6 +28,15 @@ BOT_DATABASE_URL=
+ DATABASE_URL=
+ DB_SSL=false
+ 
++# 사용자 데이터(회원·세션·게시글·신고)를 쓰는 계정입니다.
++# 위의 읽기 전용 계정과 역할이 다르므로 같은 값을 넣지 않습니다.
++# db/scripts/create-auth-role.sh · create-community-role.sh 로 만듭니다.
++#
++# 둘은 서로의 테이블을 볼 수 없습니다 — 인증 계정은 게시글을, 커뮤니티 계정은
++# 회원을 읽지 못합니다. 비워두면 소유자 계정으로 대체되지 않고 연결이 거부됩니다.
++AUTH_DATABASE_URL=
++COMMUNITY_DATABASE_URL=
++
+ # 내부 서비스 주소입니다. 브라우저는 이 주소를 직접 호출하지 않습니다.
+ RAG_API_URL=http://127.0.0.1:5051
+ RAG_TIMEOUT_MS=20000
+diff --git a/product/src/config/dataMode.ts b/product/src/config/dataMode.ts
+index eca38c0..937247e 100644
+--- a/product/src/config/dataMode.ts
++++ b/product/src/config/dataMode.ts
+@@ -17,6 +17,14 @@ export function getContractDataMode(): DataMode {
+   return parseDataMode(process.env.CONTRACT_DATA_MODE) ?? getDataMode();
+ }
+ 
++export function getAuthDataMode(): DataMode {
++  return parseDataMode(process.env.AUTH_DATA_MODE) ?? getDataMode();
++}
++
++export function getCommunityDataMode(): DataMode {
++  return parseDataMode(process.env.COMMUNITY_DATA_MODE) ?? getDataMode();
++}
++
+ export function getMockDelayMs(): number {
+   const parsed = Number(process.env.MOCK_DELAY_MS ?? 250);
+   if (!Number.isFinite(parsed)) return 250;
+diff --git a/product/src/server/auth/sessionStore.ts b/product/src/server/auth/sessionStore.ts
+deleted file mode 100644
+index e2ba18b..0000000
+--- a/product/src/server/auth/sessionStore.ts
++++ /dev/null
+@@ -1,96 +0,0 @@
+-import "server-only";
+-
+-import { createHash, randomBytes } from "node:crypto";
+-
+-import type { SessionUserDto } from "@/app/api/auth/authApiContract";
+-
+-interface StoredSession {
+-  token_hash: string;
+-  user: SessionUserDto;
+-  expires_at_ms: number;
+-}
+-
+-export interface IssuedSession {
+-  token: string;
+-  user: SessionUserDto;
+-  expires_at: string;
+-}
+-
+-export interface ResolvedSession {
+-  user: SessionUserDto;
+-  expires_at: string;
+-}
+-
+-const DEFAULT_SESSION_TTL_SECONDS = 8 * 60 * 60;
+-
+-const authGlobal = globalThis as typeof globalThis & {
+-  __donworryMockSessions?: Map<string, StoredSession>;
+-};
+-
+-const sessions = authGlobal.__donworryMockSessions ?? new Map<string, StoredSession>();
+-authGlobal.__donworryMockSessions = sessions;
+-
+-function hashToken(token: string): string {
+-  return createHash("sha256").update(token, "utf8").digest("hex");
+-}
+-
+-function isValidTokenShape(token: string): boolean {
+-  return /^[A-Za-z0-9_-]{43}$/.test(token);
+-}
+-
+-function getSessionTtlSeconds(): number {
+-  const parsed = Number(process.env.AUTH_SESSION_TTL_SECONDS ?? DEFAULT_SESSION_TTL_SECONDS);
+-  if (!Number.isInteger(parsed) || parsed < 15 * 60 || parsed > 7 * 24 * 60 * 60) {
+-    return DEFAULT_SESSION_TTL_SECONDS;
+-  }
+-  return parsed;
+-}
+-
+-function pruneExpiredSessions(now = Date.now()): void {
+-  for (const [tokenHash, session] of sessions) {
+-    if (session.expires_at_ms <= now) sessions.delete(tokenHash);
+-  }
+-}
+-
+-export function issueSession(user: SessionUserDto, now = Date.now()): IssuedSession {
+-  pruneExpiredSessions(now);
+-  for (const [tokenHash, session] of sessions) {
+-    if (session.user.user_id === user.user_id) sessions.delete(tokenHash);
+-  }
+-  const token = randomBytes(32).toString("base64url");
+-  const tokenHash = hashToken(token);
+-  const expiresAtMs = now + getSessionTtlSeconds() * 1000;
+-  sessions.set(tokenHash, {
+-    token_hash: tokenHash,
+-    user: { ...user },
+-    expires_at_ms: expiresAtMs,
+-  });
+-  return {
+-    token,
+-    user: { ...user },
+-    expires_at: new Date(expiresAtMs).toISOString(),
+-  };
+-}
+-
+-export function resolveSession(token: string | null, now = Date.now()): ResolvedSession | null {
+-  if (!token || !isValidTokenShape(token)) return null;
+-  const tokenHash = hashToken(token);
+-  const session = sessions.get(tokenHash);
+-  if (!session) return null;
+-  if (session.expires_at_ms <= now) {
+-    sessions.delete(tokenHash);
+-    return null;
+-  }
+-  return {
+-    user: { ...session.user },
+-    expires_at: new Date(session.expires_at_ms).toISOString(),
+-  };
+-}
+-
+-export function revokeSession(token: string | null): void {
+-  if (token && isValidTokenShape(token)) sessions.delete(hashToken(token));
+-}
+-
+-export function resetMockSessionsForTests(): void {
+-  sessions.clear();
+-}
+diff --git a/product/src/server/databaseConfig.ts b/product/src/server/databaseConfig.ts
+index 2c8ef39..642fa02 100644
+--- a/product/src/server/databaseConfig.ts
++++ b/product/src/server/databaseConfig.ts
+@@ -19,18 +19,41 @@ function readDatabaseValues(): Record<string, string> {
+   }
+ }
+ 
++function buildRoleUrl(
++  values: Record<string, string>,
++  user: string | undefined,
++  password: string | undefined,
++): string | undefined {
++  const database = values.DB_NAME?.trim();
++  const host = values.DB_HOST?.trim() || "127.0.0.1";
++  const port = Number(values.DB_PORT ?? 5432);
++  const trimmedUser = user?.trim();
++  const trimmedPassword = password?.trim();
++  if (!trimmedUser || !trimmedPassword || !database) return undefined;
++  if (!Number.isInteger(port) || port < 1 || port > 65_535) return undefined;
++
++  return `postgresql://${encodeURIComponent(trimmedUser)}:${encodeURIComponent(trimmedPassword)}@${host}:${port}/${encodeURIComponent(database)}`;
++}
++
+ export function buildBotDatabaseUrl(values: Record<string, string>): string | undefined {
+   const direct = validDirectUrl(values.BOT_DATABASE_URL);
+   if (direct) return direct;
+ 
+-  const user = values.BOT_USER?.trim() || values.BOT_NAME?.trim();
+-  const password = values.BOT_PASSWORD?.trim();
+-  const database = values.DB_NAME?.trim();
+-  const host = values.DB_HOST?.trim() || "127.0.0.1";
+-  const port = Number(values.DB_PORT ?? 5432);
+-  if (!user || !password || !database || !Number.isInteger(port) || port < 1 || port > 65_535) return undefined;
++  return buildRoleUrl(values, values.BOT_USER || values.BOT_NAME, values.BOT_PASSWORD);
++}
++
++export function buildAuthDatabaseUrl(values: Record<string, string>): string | undefined {
++  return (
++    validDirectUrl(values.AUTH_DATABASE_URL) ??
++    buildRoleUrl(values, values.AUTH_USER, values.AUTH_PASSWORD)
++  );
++}
+ 
+-  return `postgresql://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}/${encodeURIComponent(database)}`;
++export function buildCommunityDatabaseUrl(values: Record<string, string>): string | undefined {
++  return (
++    validDirectUrl(values.COMMUNITY_DATABASE_URL) ??
++    buildRoleUrl(values, values.COMMUNITY_USER, values.COMMUNITY_PASSWORD)
++  );
+ }
+ 
+ export function getDatabaseConnectionString(): string | undefined {
+@@ -40,3 +63,20 @@ export function getDatabaseConnectionString(): string | undefined {
+     buildBotDatabaseUrl(readDatabaseValues())
+   );
+ }
++
++/*
++ * 쓰기 롤은 DATABASE_URL(소유자 계정)로 절대 대체하지 않는다.
++ * 대체를 허용하면 wg_auth·wg_community 설정을 빠뜨린 환경에서 앱이 조용히
++ * 전체 권한 계정으로 붙어, 나연이 롤을 분리한 이유가 통째로 사라진다.
++ * 설정이 없으면 연결하지 않고 실패하는 편이 안전하다.
++ */
++export function getAuthDatabaseConnectionString(): string | undefined {
++  return validDirectUrl(process.env.AUTH_DATABASE_URL) ?? buildAuthDatabaseUrl(readDatabaseValues());
++}
++
++export function getCommunityDatabaseConnectionString(): string | undefined {
++  return (
++    validDirectUrl(process.env.COMMUNITY_DATABASE_URL) ??
++    buildCommunityDatabaseUrl(readDatabaseValues())
++  );
++}
+diff --git a/product/src/server/postgresWrite.ts b/product/src/server/postgresWrite.ts
+new file mode 100644
+index 0000000..9fd9fae
+--- /dev/null
++++ b/product/src/server/postgresWrite.ts
+@@ -0,0 +1,224 @@
++import { Pool, type PoolClient, type QueryResultRow } from "pg";
++import {
++  getAuthDatabaseConnectionString,
++  getCommunityDatabaseConnectionString,
++} from "@/server/databaseConfig";
++import { ServiceError } from "@/utils/errors";
++
++/*
++ * 사용자 데이터(회원·세션·게시글·신고)를 쓰는 연결 계층.
++ *
++ * server/postgres.ts 와 절대 섞지 않는다. 그쪽은 ML 산출물을 읽는
++ * 읽기 전용 경로이고, 연결 자체가 default_transaction_read_only 로 잠겨 있다.
++ * 여기는 쓰기가 목적이므로 그 잠금이 없다. 한 모듈에서 둘을 다루면
++ * 실수로 읽기 전용 잠금이 풀린 연결로 ML 데이터를 건드릴 수 있다.
++ *
++ * 롤도 둘로 나뉜다. wg_auth 는 회원·세션만, wg_community 는 게시글·신고만
++ * 볼 수 있고 서로의 테이블에는 접근 권한이 없다. 그래서 게시글 작성 한 건이
++ * "인증 연결로 세션 확인 → 커뮤니티 연결로 저장" 두 단계로 나뉘며,
++ * 두 단계를 한 트랜잭션으로 묶을 수 없다.
++ */
++
++export type WriteRole = "auth" | "community";
++
++interface RoleSpec {
++  getConnectionString: () => string | undefined;
++  applicationName: string;
++  notConfiguredCode: string;
++  notConfiguredMessage: string;
++}
++
++const ROLE_SPECS: Record<WriteRole, RoleSpec> = {
++  auth: {
++    getConnectionString: getAuthDatabaseConnectionString,
++    applicationName: "donworry-product-auth",
++    notConfiguredCode: "AUTH_DATABASE_NOT_CONFIGURED",
++    notConfiguredMessage: "사용자 인증 데이터베이스 연결 정보가 설정되지 않았습니다.",
++  },
++  community: {
++    getConnectionString: getCommunityDatabaseConnectionString,
++    applicationName: "donworry-product-community",
++    notConfiguredCode: "COMMUNITY_DATABASE_NOT_CONFIGURED",
++    notConfiguredMessage: "커뮤니티 데이터베이스 연결 정보가 설정되지 않았습니다.",
++  },
++};
++
++const pools = new Map<WriteRole, Pool>();
++
++function getPool(role: WriteRole): Pool {
++  const existing = pools.get(role);
++  if (existing) return existing;
++
++  const spec = ROLE_SPECS[role];
++  const connectionString = spec.getConnectionString();
++  if (!connectionString) {
++    throw new ServiceError(spec.notConfiguredCode, spec.notConfiguredMessage, 503, true);
++  }
++
++  const pool = new Pool({
++    connectionString,
++    // 롤당 CONNECTION LIMIT 20 이므로 앱 인스턴스가 여럿이어도 여유가 남는 값을 쓴다.
++    max: 5,
++    idleTimeoutMillis: 10_000,
++    connectionTimeoutMillis: 5_000,
++    ssl: process.env.DB_SSL === "true" ? { rejectUnauthorized: true } : undefined,
++    application_name: spec.applicationName,
++    // 롤에도 같은 값이 걸려 있다(create-*-role.sh). 연결 쪽에도 두는 것은
++    // 롤 설정이 빠진 환경에서도 폭주 쿼리를 막기 위한 이중 방어다.
++    options: "-c statement_timeout=10000",
++  });
++  pools.set(role, pool);
++  return pool;
++}
++
++const ALLOWED_FIRST_KEYWORD = /^(select|with|insert|update|delete)\b/;
++const FORBIDDEN_KEYWORD =
++  /\b(alter|drop|truncate|create|grant|revoke|copy|vacuum|analyze|reindex|cluster|refresh|comment|call|do|listen|notify|prepare|deallocate|execute|security)\b/;
++
++/*
++ * 값은 전부 파라미터로 넘기므로 SQL 문자열에는 사용자 입력이 들어오지 않는다.
++ * 그래도 문자열 리터럴과 주석을 먼저 지우고 검사한다 — 검사 대상에 리터럴이
++ * 남아 있으면 본문에 'drop' 같은 단어가 들어간 글이 차단되는 오탐이 생긴다.
++ */
++function stripLiteralsAndComments(sql: string): string {
++  return sql
++    .replace(/--[^\n]*/g, " ")
++    .replace(/\/\*[\s\S]*?\*\//g, " ")
++    .replace(/'(?:''|[^'])*'/g, " ")
++    .replace(/"(?:""|[^"])*"/g, " ")
++    .replace(/\s+/g, " ")
++    .trim()
++    .toLowerCase();
++}
++
++/*
++ * 차단된 문장은 DB 장애가 아니라 우리 코드의 버그다. 별도 타입으로 던져서
++ * 트랜잭션 안에서 걸려도 503으로 둔갑하지 않고 그대로 드러나게 한다.
++ */
++export class WriteStatementBlockedError extends Error {
++  constructor(message: string) {
++    super(message);
++    this.name = "WriteStatementBlockedError";
++  }
++}
++
++export function assertWriteStatementAllowed(sql: string): void {
++  const normalized = stripLiteralsAndComments(sql);
++
++  // 끝에 붙은 세미콜론 하나는 허용하고, 그 뒤에 다른 문장이 오는 것은 막는다.
++  // 금지어 검사보다 먼저 봐야 "왜 막혔는지"가 정확히 나온다.
++  if (/;\s*\S/.test(normalized)) {
++    throw new WriteStatementBlockedError("쓰기 adapter는 한 번에 한 문장만 실행할 수 있습니다.");
++  }
++  if (!ALLOWED_FIRST_KEYWORD.test(normalized)) {
++    throw new WriteStatementBlockedError(
++      "쓰기 adapter는 SELECT/WITH/INSERT/UPDATE/DELETE만 실행할 수 있습니다.",
++    );
++  }
++  if (FORBIDDEN_KEYWORD.test(normalized)) {
++    throw new WriteStatementBlockedError("쓰기 adapter에서 스키마·권한 변경 SQL이 차단되었습니다.");
++  }
++}
++
++function unavailable(role: WriteRole): ServiceError {
++  return new ServiceError(
++    "DATABASE_UNAVAILABLE",
++    role === "auth"
++      ? "사용자 인증 데이터베이스에 접근하지 못했습니다."
++      : "커뮤니티 데이터베이스에 접근하지 못했습니다.",
++    503,
++    true,
++  );
++}
++
++/*
++ * 오류 처리 원칙: 연결·인프라 문제만 503으로 바꾸고,
++ * 서버가 SQLSTATE를 붙여 돌려준 오류(제약 위반 등)는 그대로 올려보낸다.
++ * 중복 신고(23505)처럼 서비스 계층이 사용자 안내로 바꿔야 하는 것이 여기 섞여 있어서,
++ * 전부 503으로 뭉개면 "이미 신고한 글입니다"를 만들 방법이 사라진다.
++ */
++function rethrow(error: unknown, role: WriteRole): never {
++  if (error instanceof ServiceError) throw error;
++  if (error instanceof WriteStatementBlockedError) throw error;
++  if (isDatabaseError(error)) throw error;
++  throw unavailable(role);
++}
++
++export async function queryWrite<T extends QueryResultRow>(
++  role: WriteRole,
++  sql: string,
++  values: unknown[] = [],
++): Promise<T[]> {
++  assertWriteStatementAllowed(sql);
++  try {
++    const result = await getPool(role).query<T>(sql, values);
++    return result.rows;
++  } catch (error) {
++    rethrow(error, role);
++  }
++}
++
++export interface WriteTransaction {
++  query<T extends QueryResultRow>(sql: string, values?: unknown[]): Promise<T[]>;
++}
++
++/*
++ * 한 롤 안에서 여러 문장을 한 트랜잭션으로 묶는다.
++ * 신고 접수처럼 "신고 행 저장 + 그 시점 게시글 스냅샷 기록"이 함께 성공하거나
++ * 함께 실패해야 하는 경우에 쓴다.
++ *
++ * 롤이 다른 작업은 여기에 묶을 수 없다. 인증과 커뮤니티는 별도 연결이다.
++ */
++export async function withWriteTransaction<T>(
++  role: WriteRole,
++  run: (transaction: WriteTransaction) => Promise<T>,
++): Promise<T> {
++  let client: PoolClient;
++  try {
++    client = await getPool(role).connect();
++  } catch (error) {
++    if (error instanceof ServiceError) throw error;
++    throw unavailable(role);
++  }
++
++  const transaction: WriteTransaction = {
++    async query<R extends QueryResultRow>(sql: string, values: unknown[] = []): Promise<R[]> {
++      assertWriteStatementAllowed(sql);
++      const result = await client.query<R>(sql, values);
++      return result.rows;
++    },
++  };
++
++  try {
++    await client.query("BEGIN");
++    const result = await run(transaction);
++    await client.query("COMMIT");
++    return result;
++  } catch (error) {
++    try {
++      await client.query("ROLLBACK");
++    } catch {
++      // 롤백 실패는 원래 오류를 덮지 않는다. 연결을 반납하면 pg가 정리한다.
++    }
++    rethrow(error, role);
++  } finally {
++    client.release();
++  }
++}
++
++/* pg가 서버에서 받은 오류에는 SQLSTATE(다섯 자리 code)가 붙는다. */
++export function isDatabaseError(error: unknown): error is Error & { code: string } {
++  if (!(error instanceof Error)) return false;
++  const code = (error as Error & { code?: unknown }).code;
++  // 23505(중복), 42501(권한 없음)처럼 숫자와 대문자가 섞인 다섯 자리다.
++  return typeof code === "string" && /^[0-9A-Z]{5}$/.test(code);
++}
++
++export function isWriteDatabaseConfigured(role: WriteRole): boolean {
++  return Boolean(ROLE_SPECS[role].getConnectionString());
++}
++
++/* 테스트에서 롤별 pool 캐시를 비운다. */
++export function resetWritePoolsForTest(): void {
++  pools.clear();
++}
+diff --git a/product/src/services/userDataProviders.ts b/product/src/services/userDataProviders.ts
+new file mode 100644
+index 0000000..603d3db
+--- /dev/null
++++ b/product/src/services/userDataProviders.ts
+@@ -0,0 +1,31 @@
++import "server-only";
++
++import { MockAuthRepository } from "@/adapters/mock/MockAuthRepository";
++import { MockCommunityRepository } from "@/adapters/mock/MockCommunityRepository";
++import { RealAuthRepository } from "@/adapters/real/RealAuthRepository";
++import { RealCommunityRepository } from "@/adapters/real/RealCommunityRepository";
++import { getAuthDataMode, getCommunityDataMode } from "@/config/dataMode";
++import type { AuthRepository } from "@/domain/auth";
++import type { CommunityRepository } from "@/domain/community";
++
++/*
++ * 사용자 데이터(회원·세션·게시글·신고) 저장소 선택.
++ *
++ * services/providers.ts 와 나눠 둔 이유가 있다. 그쪽은 사업장·위험도·상담처럼
++ * 화면 어디서나 쓰는 공용 조회 어댑터를 모아 두는 곳이고, 이 파일이 다루는
++ * 저장소는 자격 증명과 쓰기 권한을 쥐고 있어 server-only 경계 안에 있어야 한다.
++ * 한 파일로 합치면 사업장 조회만 필요한 모듈까지 인증 코드를 끌고 들어온다.
++ */
++
++const mockAuthRepository = new MockAuthRepository();
++const realAuthRepository = new RealAuthRepository();
++const realCommunityRepository = new RealCommunityRepository();
++const mockCommunityRepository = new MockCommunityRepository();
++
++export function getAuthRepository(): AuthRepository {
++  return getAuthDataMode() === "real" ? realAuthRepository : mockAuthRepository;
++}
++
++export function getCommunityRepository(): CommunityRepository {
++  return getCommunityDataMode() === "real" ? realCommunityRepository : mockCommunityRepository;
++}

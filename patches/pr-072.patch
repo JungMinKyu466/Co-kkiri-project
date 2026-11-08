@@ -1,0 +1,1402 @@
+diff --git a/db/docs/DRIFT_CHECK_COVERAGE.md b/db/docs/DRIFT_CHECK_COVERAGE.md
+index 1cd14ba..6ac37bd 100644
+--- a/db/docs/DRIFT_CHECK_COVERAGE.md
++++ b/db/docs/DRIFT_CHECK_COVERAGE.md
+@@ -1,9 +1,10 @@
+ # 드리프트 검사기 후조건 커버리지
+ 
+ > **한 줄 요약**
+-> `npm run check:migration-drift` 는 이제 **0006~0012 를 모두 검사한다.**
++> `npm run check:migration-drift` 는 이제 **0006~0013 을 모두 검사한다.**
+ > 2026-09-09 에 0009·0010·0011 키 28개를 등록해 공백을 메웠고,
+-> 2026-09-13 에 0012 키 11개를 같은 PR 에서 등록했다.
++> 2026-09-13 에 0012 키 11개를 같은 PR 에서 등록했고,
++> 2026-09-14 에 K5 현장 신고 분류·상태를 검증하는 0013 키 7개를 추가했다.
+ > `0000`~`0005` 는 여전히 후조건이 없다 — 그 구간은 [수동 검증](#수동-검증-절차) 범위 밖이다.
+ 
+ 기록 시점: 2026-09-07 · **갱신 2026-09-13** · 대상 `db/scripts/check-migration-drift.mjs`,
+@@ -38,6 +39,7 @@
+ | `0010_crazy_talos` | ✓ | **7개 키** — worksite_tips, worksite_tip_attachments |
+ | `0011_lumpy_proteus` | ✓ | **5개 키** — 전부 부재 확인(users.role·firm_id 와 그 제약 3종) |
+ | `0012_v_region_industry_signal` | ✓ | **11개 키** — 뷰 + 집계 컬럼 7종 존재, 개별 사업장 값(firm_id·risk_full·rank) **부재** |
++| `0013_illegal_sir_ram` | ✓ | **7개 키** — 현장 신고 category/status 컬럼·제약·기본값·정렬 인덱스 |
+ 
+ 0012 에 부재 확인을 함께 넣은 이유: 이 뷰의 규격(N6)이 *"개별 기업 점수·순위
+ 컬럼은 넣지 않음"* 이다. `CREATE OR REPLACE VIEW` 는 컬럼을 조용히 더할 수 있으므로,
+@@ -50,11 +52,15 @@
+ > 읽게 만들었다. 후조건은 migration 이 **끝난 뒤의 상태**를 기술해야 한다.
+ > `db/tests/migration-drift.test.mjs` 가 이 형태를 고정한다.
+ 
+-**합계 54개 키** (0012 이전 43개). 2026-09-09 에 PostgreSQL 16 에 migration 12개를 순서대로 적용한 뒤
++**합계 61개 키** (0012 이전 43개). 2026-09-09 에 PostgreSQL 16 에 migration 12개를 순서대로 적용한 뒤
+ `POSTCONDITIONS_SQL` 을 실행해 **43/43 통과**를 실측했다. 이어서 `users.role` 을 되살려
+ `column_absent:public.users.role` 이 `false` 로 뒤집히는 것까지 확인했다 — 검사가 실제로
+ 드리프트를 잡는다는 뜻이다.
+ 
++0013은 Drizzle snapshot·후조건 등록 무결성·API 저장 계약까지 로컬 검사를 통과했다. 현재 Windows
++환경에는 실행 중인 PostgreSQL 16이 없으므로, 실제 migration 적용과 61/61 후조건 확인은 GCP 배포 전
++복원 리허설 DB에서 수행한다.
++
+ `evaluatePostconditions()` 는 `POSTCONDITION_KEYS` 에 없는 tag 에 대해 `null` 을 반환하고,
+ 호출부가 그 결과를 `.filter(Boolean)` 으로 버린다. 즉 **미등록 migration 은 조용히
+ 검사에서 빠진다.** 실패하지 않고, 경고도 남기지 않는다.
+diff --git a/db/docs/MIGRATION_OPERATIONS.md b/db/docs/MIGRATION_OPERATIONS.md
+index a71741f..e1e1eae 100644
+--- a/db/docs/MIGRATION_OPERATIONS.md
++++ b/db/docs/MIGRATION_OPERATIONS.md
+@@ -6,10 +6,11 @@
+ 영수증이 어긋난 상태에서 `drizzle-kit migrate`를 실행하면 이미 존재하는 컬럼을 다시 바꾸거나 view를
+ 재생성하려 할 수 있다.
+ 
+-## 현재 상태 (2026-09-11 기준)
++## 현재 상태 (2026-09-14 기준)
+ 
+-- 로컬 journal: `0000`~`0011`, 12개
+-- 운영 DB ledger: `0000`~`0011`, 12개 — `aligned`
++- 로컬 journal: `0000`~`0013`, 14개
++- 마지막으로 확인된 운영 DB ledger: `0000`~`0011`, 12개. `0012`·`0013`의 실제 적용 여부는
++  배포 직전 읽기 전용 drift 검사로 다시 확인한다.
+ - DB 계정 4종: `wg_bot`(AI 상담용, Path B 계약 대상) · `wg_auth`(회원·세션) ·
+   `wg_community`(게시글·신고·사업장·`v_posts`·댓글 조회·피드백) · `wg_tip`(현장 제보, 신규)
+ - 위 계정은 모두 DB 소유자 계정(`wageguard`)과 별개의 애플리케이션 전용 계정이다.
+@@ -43,7 +44,7 @@ npm run migrate
+ **이미 스키마를 먼저 적용해버린 경우**: 롤을 만든 뒤 `0009`의 권한 블록만 다시 실행해도 된다.
+ `DO $$ ... END $$` 블록은 재실행해도 안전하다(멱등).
+ 
+-`0010`, `0011`에는 이런 조건부 권한 부여가 없다 — `wg_tip` 권한은 `create-tip-role.sh` 스크립트
++`0010`~`0013`에는 이런 조건부 권한 부여가 없다 — `wg_tip` 권한은 `create-tip-role.sh` 스크립트
+ 자체가 부여하므로 이 순서 의존성이 없다.
+ 
+ ## 배포 전 읽기 전용 검사
+@@ -101,12 +102,12 @@ npm run check:migration-drift -- --env-file /path/to/env --json
+ 
+ ## 정상 `aligned` 결과 예시
+ 
+-`0000`~`0011`이 모두 적용되고 각 migration의 후조건(테이블·컬럼·view·index)이 전부 충족되면
++`0000`~`0013`이 모두 적용되고 각 migration의 후조건(테이블·컬럼·view·index)이 전부 충족되면
+ 다음과 같은 결과가 정상이다.
+ 
+ ```text
+ 상태: aligned
+-DB ledger: 12개 (일치 prefix 12개)
++DB ledger: 14개 (일치 prefix 14개)
+ 적용 대기: 없음
+ 로컬 migration journal과 DB ledger 및 알려진 schema 후조건이 일치합니다.
+ ```
+diff --git a/db/schema.ts b/db/schema.ts
+index 6577684..2634fdd 100644
+--- a/db/schema.ts
++++ b/db/schema.ts
+@@ -484,7 +484,10 @@ export const worksiteTips = pgTable(
+   {
+     id: uuid().primaryKey().defaultRandom(),
+     reporterId: uuid("reporter_id").notNull().references(() => users.id, { onDelete: "restrict" }),
+-    category: text().notNull().default("worksite_tip"),
++    /** K5 현장 신고 분류: 임금 / 산재 */
++    category: text().notNull(),
++    /** 접수 상태는 읽기 전용이며 이번 범위에는 변경 API가 없다. */
++    status: text().notNull().default("received"),
+     title: text().notNull(),
+     body: text(),
+     firmId: text("firm_id").references(() => firms.firmId, { onDelete: "set null" }),
+@@ -494,7 +497,9 @@ export const worksiteTips = pgTable(
+     index("worksite_tips_reporter_idx").on(t.reporterId),
+     index("worksite_tips_firm_idx").on(t.firmId),
+     index("worksite_tips_submitted_idx").on(t.submittedAt.desc()),
+-    check("worksite_tips_category_ck", sql`${t.category} = 'worksite_tip'`),
++    index("worksite_tips_status_submitted_idx").on(t.status, t.submittedAt.desc()),
++    check("worksite_tips_category_ck", sql`${t.category} in ('wage','safety')`),
++    check("worksite_tips_status_ck", sql`${t.status} in ('received','in_progress','completed')`),
+   ],
+ );
+ 
+diff --git a/db/scripts/check-migration-drift.mjs b/db/scripts/check-migration-drift.mjs
+index e259dd7..f454530 100644
+--- a/db/scripts/check-migration-drift.mjs
++++ b/db/scripts/check-migration-drift.mjs
+@@ -501,6 +501,51 @@ SELECT json_build_object(
+         WHERE table_schema='public' AND table_name='v_region_industry_signal' AND column_name='rank'
+       )
+     )
++  ),
++  '0013_illegal_sir_ram', json_build_object(
++    'column:public.worksite_tips.status', EXISTS (
++      SELECT 1 FROM information_schema.columns
++      WHERE table_schema='public' AND table_name='worksite_tips' AND column_name='status'
++    ),
++    'index:public.worksite_tips_status_submitted_idx', EXISTS (
++      SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
++      WHERE n.nspname='public' AND c.relname='worksite_tips_status_submitted_idx'
++        AND c.relkind IN ('i','I')
++    ),
++    'constraint:public.worksite_tips.worksite_tips_status_ck', EXISTS (
++      SELECT 1 FROM pg_constraint con JOIN pg_class c ON c.oid=con.conrelid
++        JOIN pg_namespace n ON n.oid=c.relnamespace
++      WHERE n.nspname='public' AND c.relname='worksite_tips'
++        AND con.conname='worksite_tips_status_ck'
++    ),
++    'constraint_definition:public.worksite_tips.worksite_tips_category_ck', EXISTS (
++      SELECT 1 FROM pg_constraint con JOIN pg_class c ON c.oid=con.conrelid
++        JOIN pg_namespace n ON n.oid=c.relnamespace
++      WHERE n.nspname='public' AND c.relname='worksite_tips'
++        AND con.conname='worksite_tips_category_ck'
++        AND pg_get_constraintdef(con.oid) ~* '''wage'''
++        AND pg_get_constraintdef(con.oid) ~* '''safety'''
++        AND pg_get_constraintdef(con.oid) !~* '''worksite_tip'''
++    ),
++    'constraint_definition:public.worksite_tips.worksite_tips_status_ck', EXISTS (
++      SELECT 1 FROM pg_constraint con JOIN pg_class c ON c.oid=con.conrelid
++        JOIN pg_namespace n ON n.oid=c.relnamespace
++      WHERE n.nspname='public' AND c.relname='worksite_tips'
++        AND con.conname='worksite_tips_status_ck'
++        AND pg_get_constraintdef(con.oid) ~* '''received'''
++        AND pg_get_constraintdef(con.oid) ~* '''in_progress'''
++        AND pg_get_constraintdef(con.oid) ~* '''completed'''
++    ),
++    'column_default:public.worksite_tips.status_received', EXISTS (
++      SELECT 1 FROM information_schema.columns
++      WHERE table_schema='public' AND table_name='worksite_tips' AND column_name='status'
++        AND column_default ~* '''received''::text'
++    ),
++    'column_default_absent:public.worksite_tips.category', EXISTS (
++      SELECT 1 FROM information_schema.columns
++      WHERE table_schema='public' AND table_name='worksite_tips' AND column_name='category'
++        AND column_default IS NULL
++    )
+   )
+ )::text;
+ COMMIT;
+diff --git a/db/scripts/migration-drift-core.mjs b/db/scripts/migration-drift-core.mjs
+index 799c0b2..f1a464d 100644
+--- a/db/scripts/migration-drift-core.mjs
++++ b/db/scripts/migration-drift-core.mjs
+@@ -79,6 +79,18 @@ export const POSTCONDITION_KEYS = Object.freeze({
+     "view_column_absent:public.v_region_industry_signal.risk_full",
+     "view_column_absent:public.v_region_industry_signal.rank",
+   ]),
++  // 0013 은 K5 현장 신고 정보설계의 분류·상태 계약을 고정한다.
++  // 컬럼/객체 존재뿐 아니라 허용값과 기본값까지 검사해야 예전 worksite_tip
++  // 고정 분류가 되살아난 상태를 aligned 로 오판하지 않는다.
++  "0013_illegal_sir_ram": Object.freeze([
++    "column:public.worksite_tips.status",
++    "index:public.worksite_tips_status_submitted_idx",
++    "constraint:public.worksite_tips.worksite_tips_status_ck",
++    "constraint_definition:public.worksite_tips.worksite_tips_category_ck",
++    "constraint_definition:public.worksite_tips.worksite_tips_status_ck",
++    "column_default:public.worksite_tips.status_received",
++    "column_default_absent:public.worksite_tips.category",
++  ]),
+ });
+ 
+ function migrationLabel(migration) {
+diff --git a/db/tests/migration-drift.test.mjs b/db/tests/migration-drift.test.mjs
+index 02cd628..90bf848 100644
+--- a/db/tests/migration-drift.test.mjs
++++ b/db/tests/migration-drift.test.mjs
+@@ -23,6 +23,8 @@ const ALL_TAGS = [
+   "0009_busy_puck",
+   "0010_crazy_talos",
+   "0011_lumpy_proteus",
++  "0012_v_region_industry_signal",
++  "0013_illegal_sir_ram",
+ ];
+ 
+ function migrations(count = ALL_TAGS.length) {
+@@ -84,6 +86,8 @@ describe("migration drift predeploy 판정", () => {
+       "0009_busy_puck",
+       "0010_crazy_talos",
+       "0011_lumpy_proteus",
++      "0012_v_region_industry_signal",
++      "0013_illegal_sir_ram",
+     ]);
+     assert.equal(result.blocked, true);
+   });
+@@ -212,6 +216,23 @@ describe("migration drift predeploy 판정", () => {
+     ]);
+     assert.equal(result.blocked, true);
+   });
++
++  it("0013의 K5 분류 제약이 예전 고정값으로 돌아가면 차단한다", () => {
++    const local = migrations();
++    const broken = checkValues("0013_illegal_sir_ram", true);
++    broken["constraint_definition:public.worksite_tips.worksite_tips_category_ck"] = false;
++
++    const result = analyzeMigrationState({
++      localMigrations: local,
++      ledgerExists: true,
++      ledgerRows: ledger(local),
++      postconditions: { ...postconditions(true), "0013_illegal_sir_ram": broken },
++    });
++
++    assert.equal(result.status, "applied_schema_mismatch");
++    assert.equal(result.appliedSchemaMismatch[0].tag, "0013_illegal_sir_ram");
++    assert.equal(result.blocked, true);
++  });
+ });
+ 
+ describe("후조건 등록 자체의 무결성", () => {
+diff --git a/infra/OPERATIONS.md b/infra/OPERATIONS.md
+index f76098d..6c7dfc2 100644
+--- a/infra/OPERATIONS.md
++++ b/infra/OPERATIONS.md
+@@ -9,6 +9,7 @@ GitHub는 코드와 작은 재현 가능 파일의 보관소이지 실행 중인
+ | --- | --- | --- |
+ | Next/TypeScript/Python 소스, migration, 문서, CI | 가능 | feature branch를 `main`에 PR로 병합하고 tag 생성 |
+ | PostgreSQL 운영 데이터 | 불가능 | `pg_dump` custom dump, checksum, 별도 비공개 저장소 |
++| 현장 제보 사진 원본·검사관용 사본 | 불가능 | `/srv/moneyworry/worksite-tip-media` archive와 checksum을 DB dump와 같은 세대로 보관 |
+ | `product/integrations/rag-api/data/labor_law_db` | 현재 5개 파일이 Git에 추적됨 | 실행 시점 archive와 checksum도 별도 보관해 Git 객체 손상·누락에 대비 |
+ | API 키·DB 비밀번호 | Git 저장 금지 | 새 배포 환경의 secret store에 이름별 재등록 후 기존 키 회전 |
+ | Python `.venv`, Node `node_modules`, 모델 cache | 보존 불필요 | lockfile/requirements로 재설치; BGE-M3 모델 확보 경로만 기록 |
+@@ -19,10 +20,11 @@ GitHub는 코드와 작은 재현 가능 파일의 보관소이지 실행 중인
+ 1. 모든 작업을 기능 브랜치에 commit하고 최신 `origin/main`을 rebase/merge한 뒤 CI를 통과시킨다.
+ 2. branch를 GitHub에 push하고 PR로 `main`에 합친다. 종료 시점 commit에 annotated tag를 만든다.
+ 3. 앱 쓰기를 잠시 멈추거나 팀과 백업 시점을 합의한 뒤 PostgreSQL logical dump를 만든다.
+-4. dump와 RAG archive에 SHA-256 checksum을 만들고, 원본 서버 밖의 비공개 저장소에 각각 2개 이상 둔다.
+-5. 빈 PostgreSQL 16 인스턴스에 restore하고 행 수·최신 batch·핵심 view를 확인한다.
+-6. 새 환경의 secret store에 필요한 변수를 등록하고 `/api/system/status`와 smoke test를 통과시킨다.
+-7. DNS/URL을 전환한 뒤 기존 서버는 읽기 전용으로 두고 최종 증분 백업을 한 번 더 만든다.
++4. 현장 제보 real 저장을 사용 중이면 같은 쓰기 중단 구간에 사진 저장소 archive도 만든다.
++5. dump, 현장 제보 archive, RAG archive에 SHA-256 checksum을 만들고, 원본 서버 밖의 비공개 저장소에 각각 2개 이상 둔다.
++6. 빈 PostgreSQL 16 인스턴스에 restore하고 행 수·최신 batch·핵심 view를 확인한다.
++7. 새 환경의 secret store에 필요한 변수를 등록하고 `/api/system/status`와 smoke test를 통과시킨다.
++8. DNS/URL을 전환한 뒤 기존 서버는 읽기 전용으로 두고 최종 증분 백업을 한 번 더 만든다.
+ 
+ 예시 명령은 실제 관리자용 DB URL을 셸 history에 직접 적지 않고 환경에서 주입한다.
+ 
+@@ -34,6 +36,11 @@ sha256sum moneyworry-YYYYMMDD.dump > moneyworry-YYYYMMDD.dump.sha256
+ tar --create --gzip --file=labor-law-db-YYYYMMDD.tar.gz \
+   -C product/integrations/rag-api/data labor_law_db
+ sha256sum labor-law-db-YYYYMMDD.tar.gz > labor-law-db-YYYYMMDD.tar.gz.sha256
++
++tar --create --gzip --file=worksite-tip-media-YYYYMMDD.tar.gz \
++  -C /srv/moneyworry worksite-tip-media
++sha256sum worksite-tip-media-YYYYMMDD.tar.gz \
++  > worksite-tip-media-YYYYMMDD.tar.gz.sha256
+ ```
+ 
+ 복원 리허설:
+@@ -103,7 +110,84 @@ systemd 배포에서는 이 목록을 하나의 공용 파일로 합치지 않
+ 
+ 배포와 migration은 분리한다. 앱 시작 명령에 자동 migration을 섞지 않고, drift가 있으면 배포를 중단한다.
+ 
+-### 5-1. VM 배포기(`moneyworry-deploy`) 계약
++### 로그인 잠금 상태
++
++로그인 5회 실패에 따른 15분 잠금은 웹 프로세스 메모리에만 저장한다. 현재 단일 VM·단일
++`moneyworry-web` 프로세스에서는 모든 로그인 요청이 같은 상태를 공유하지만, 다음 경우에는 실패 횟수와
++남은 잠금 시간이 초기화된다.
++
++- 코드 배포, 수동 재시작, 장애 또는 health-watch에 따른 웹 프로세스 재시작
++- VM 재부팅과 `daily18h` 예약 종료·시작
++
++이 상태는 백업·복원 대상이 아니며 여러 프로세스나 VM 사이에 공유되지 않는다. 재시작 이후에도 잠금을
++보장하거나 웹을 수평 확장하기 전에는 DB 또는 Redis 같은 공유 저장소로 이전한다.
++
++## 6. 현장 제보 GCP 저장 전환
++
++현장 제보 한 건은 PostgreSQL의 `worksite_tips`·`worksite_tip_attachments` 행과
++`/srv/moneyworry/worksite-tip-media`의 사진 파일로 나뉜다. 따라서 DB dump와 media archive는
++항상 같은 전환 시각의 한 쌍으로 취급한다. 둘 중 하나만 복구하면 DB가 가리키는 파일이 없거나,
++소유자를 잃은 원본 파일이 남는다.
++
++### 전환 전 gate
++
++다음 순서는 sudo와 DB 운영 권한이 있는 운영자가 수행한다. 일반 OS Login 계정이 우회해서
++`/etc/moneyworry`, systemd, Docker 또는 데이터 디스크의 소유권을 바꾸면 안 된다.
++
++1. 배포할 commit의 CI와 복원 리허설이 통과했는지 확인한다.
++2. `check:migration-drift`를 읽기 전용으로 실행하고, `0010`의 현장 제보 두 테이블과 최신 migration
++   원장이 모두 적용된 상태인지 확인한다. migration은 앱 배포와 분리해 적용한다.
++3. `wg_tip`에 `firms` SELECT, 현장 제보 두 테이블 SELECT·INSERT만 있는지 확인한다. 롤 준비
++   스크립트를 다시 실행할 때는 다른 앱 롤의 기존 grant를 함께 점검한다.
++4. 웹을 중지해 새 제보 쓰기를 막은 상태에서 custom-format DB dump와 media archive를 만들고,
++   두 파일의 SHA-256과 생성 시각을 한 manifest에 기록한다. 0바이트가 아닌지와 archive 목록도 확인한다.
++5. dump와 archive를 VM 밖의 비공개 저장소로 복사한다. DB까지 중지한 뒤 GCE
++   `moneyworry-data` Persistent Disk snapshot을 추가로 만들면 PostgreSQL과 media의 동일 시점
++   재해복구 지점을 얻을 수 있다. snapshot 완료 후 DB만 먼저 다시 시작한다.
++
++전환용 `web.env`는 root 전용 임시 파일에서 완성한 뒤 원자적으로 교체한다. 실제 비밀번호를 명령행,
++셸 history, 로그에 쓰지 않는다. 아래 네 값이 함께 있어야 한다.
++
++- `WORKSITE_TIP_DATA_MODE=real`
++- 전용 `wg_tip`의 loopback `TIP_DATABASE_URL`
++- `WORKSITE_TIP_STORAGE_ROOT=/srv/moneyworry/worksite-tip-media`
++- 기존 auth/community를 포함한 나머지 필수 production 값
++
++그 다음 `validate-service-envs.py`를 통과시키고 `install-systemd-units.sh --force`를 실행한다.
++설치기는 media root를 웹 서비스 계정 소유 `0700`으로 준비하고, systemd에는 그 경로 하나만
++`ReadWritePaths`로 연다. unit과 env 검증이 끝난 뒤 웹을 시작한다.
++
++### 전환 확인
++
++1. loopback readiness가 HTTP 200인지 확인한다.
++2. 승인된 시험 사용자로 사진이 포함된 제보 한 건을 저장한다.
++3. `wg_tip` 읽기 경로에서 제보·첨부 메타데이터, `storage_key`, SHA-256이 생성됐는지 확인한다.
++4. media root에 원본과 검사관용 사본이 모두 있고, 디렉터리 `0700`, 파일 `0600`, 웹 계정 소유인지 확인한다.
++5. 검사관 계정으로 목록·상세·사진 다운로드를 확인하고, 다운로드 사본에 EXIF 위치·시간·기기 정보가
++   없는지 검사한다. 일반 사용자와 비로그인 요청은 검사관 API에서 403이어야 한다.
++6. 웹을 한 번 재시작한 뒤 같은 제보와 사진을 다시 조회한다. 이 단계까지 통과하기 전에는 전환 완료로
++   공지하지 않는다.
++
++### rollback
++
++시험 제보 외의 real 쓰기를 아직 받지 않았다면 웹을 중지하고 이전 release와 이전 `web.env`를
++원자적으로 복원한 뒤, 이전 unit을 다시 설치하고 웹을 시작한다. 실패한 real 저장소는 조사용으로
++보존하며 임의로 파일이나 DB 행을 지우지 않는다.
++
++real 쓰기를 받은 뒤에는 단순히 mode만 mock으로 되돌리지 않는다. 먼저 웹을 중지하고 현재 DB와 media를
++새로운 incident 세대로 한 번 더 백업한다. 이후 팀의 데이터 보존 결정을 받아 다음 중 하나를 택한다.
++
++- 코드만 이전 release로 돌려도 real 저장 계약을 유지할 수 있으면 DB와 media는 그대로 둔다.
++- 전환 전 상태로 되돌려야 하면 같은 세대의 DB dump와 media archive를 함께 복원한다. 이 복원은 전환 뒤
++  생성된 인증·커뮤니티·제보 데이터를 잃을 수 있으므로 영향 행을 먼저 추출하고 명시적 데이터 손실 승인을
++  받은 뒤 수행한다.
++- 파일시스템이나 PostgreSQL 자체가 손상됐으면 웹과 DB를 중지하고 검증된 GCE snapshot으로 새 디스크를
++  만든 뒤 교체한다. 기존 디스크는 삭제하지 말고 조사·재복구용으로 보존한다.
++
++복구 후에는 DB dump checksum, media archive checksum, migration drift, DB의 모든 `storage_key`에 대응하는
++검사관용 파일 존재 여부, 재시작 후 조회를 다시 확인한다. DB와 media 중 한쪽만 성공한 상태에서는 웹을
++열지 않는다.
++## 7. VM 배포기(`moneyworry-deploy`) 계약
+ 
+ > 실제 배포는 이력을 남기는 래퍼 `moneyworry-deploy-run` 으로 한다.
+ > 아래는 그 래퍼가 감싸는 배포기 자체의 계약이다. [`DEPLOY_HISTORY.md`](DEPLOY_HISTORY.md) 참고.
+diff --git a/infra/README.md b/infra/README.md
+index 6da0439..b9bdbca 100644
+--- a/infra/README.md
++++ b/infra/README.md
+@@ -48,7 +48,7 @@ RAG unit의 시작 timeout은 cold hash/stage와 CPU model warmup을 포함해 1
+ 
+ ```text
+ /etc/moneyworry/db.env        DB compose/admin 값, DB 계정만 읽기 가능
+-/etc/moneyworry/web.env       BOT_DATABASE_URL + 웹/LLM/Basic/internal Auth 값, root:root 0600
++/etc/moneyworry/web.env       bot·앱 전용 DB URL + 웹/LLM/Basic/internal Auth 값, root:root 0600
+ /etc/moneyworry/rag.env       RAG 튜닝값 + RAG 전용 internal token, root:root 0600
+ /etc/moneyworry/contract.env  계약 분석 API 키/튜닝값 + 전용 internal token, root:root 0600
+ ```
+@@ -57,7 +57,8 @@ RAG unit의 시작 timeout은 cold hash/stage와 CPU model warmup을 포함해 1
+ 
+ `db.env`는 DB 계정 소유 `0600` 또는 `root:DB_GROUP 0640`이어야 한다. 나머지 세 파일은
+ `root:root 0600`이어야 하며 systemd PID 1만 읽어서 각 프로세스에 전달한다. `web.env`에는
+-`DATABASE_URL`, `DB_PASSWORD` 등 관리자 연결값을 넣지 않고 `BOT_DATABASE_URL`만 둔다.
++`DATABASE_URL`, `DB_PASSWORD` 등 관리자 연결값을 넣지 않고 `BOT_DATABASE_URL`과
++`AUTH_DATABASE_URL`·`COMMUNITY_DATABASE_URL`·`TIP_DATABASE_URL`처럼 권한이 제한된 앱 롤 URL만 둔다.
+ `rag.env`에는 RAG 전용 internal token 외의 비밀번호·token·API key를 넣지 않는다. PostgreSQL이 부트 디스크의 Docker 기본
+ volume으로 빠지지 않도록 `db.env`의 `POSTGRES_DATA_DIR`은 반드시
+ `/srv/moneyworry/postgres`로 지정한다. 실제 secret 값은 명령행이나 저장소에 쓰지 않는다.
+@@ -89,3 +90,8 @@ RAG는 추가로 sealed BGE-M3 snapshot과 Chroma 다섯 파일의 hash를 읽
+ size, SHA-256과 JSON/JSONL 구조를 검증하며, manifest digest가 Next readiness pin과 다르면 준비 상태로
+ 인정하지 않는다. 네 unit 모두 `LimitCORE=0`으로 provider key, internal token, 계약 원문이 core dump에
+ 남지 않게 한다.
++
++현장 제보 real 저장은 DB 행과 데이터 디스크의 사진 파일을 함께 사용한다. 파일 root는
++`/srv/moneyworry/worksite-tip-media`로 고정하고 웹 서비스 계정 소유 `0700`으로 둔다. installer가
++이 경로를 준비·검증하며, web unit의 쓰기 권한도 이 경로 하나로 제한한다. DB와 media를 같은 세대로
++백업하고 전환·복구하는 절차는 [`OPERATIONS.md`](OPERATIONS.md)의 현장 제보 전환 절을 따른다.
+diff --git a/infra/scripts/install-systemd-units.sh b/infra/scripts/install-systemd-units.sh
+index cc310ea..898aaf8 100755
+--- a/infra/scripts/install-systemd-units.sh
++++ b/infra/scripts/install-systemd-units.sh
+@@ -7,6 +7,7 @@ SYSTEMD_DIR="/etc/systemd/system"
+ DATA_MOUNT_ROOT="/srv/moneyworry"
+ DATA_DISK_BY_ID="/dev/disk/by-id/google-moneyworry-data"
+ DATA_DISK_BYTES="85899345920"
++WORKSITE_TIP_STORAGE_ROOT="/srv/moneyworry/worksite-tip-media"
+ SYSTEMD_DROPIN_ROOTS=(
+   /etc/systemd/system
+   /run/systemd/system
+@@ -563,6 +564,61 @@ if ! python3 "$SCRIPT_DIR/validate-service-envs.py" \
+   die "split environment contract validation failed"
+ fi
+ 
++# The web process stores originals and metadata-stripped inspector copies below
++# one private directory on the persistent data disk. Create only the fixed path;
++# never follow or repair a symlink, nested mount, or unexpected existing entry.
++if [[ -L "$WORKSITE_TIP_STORAGE_ROOT" \
++  || ( -e "$WORKSITE_TIP_STORAGE_ROOT" && ! -d "$WORKSITE_TIP_STORAGE_ROOT" ) ]]; then
++  die "worksite tip storage root must be a real directory: $WORKSITE_TIP_STORAGE_ROOT"
++fi
++if [[ ! -e "$WORKSITE_TIP_STORAGE_ROOT" ]]; then
++  install -d -o "$WEB_SERVICE_USER" -g "$WEB_SERVICE_GROUP" -m 0700 \
++    -- "$WORKSITE_TIP_STORAGE_ROOT"
++fi
++[[ "$(realpath -e -- "$WORKSITE_TIP_STORAGE_ROOT")" == "$WORKSITE_TIP_STORAGE_ROOT" ]] \
++  || die "worksite tip storage root or an ancestor is a symlink"
++if mountpoint -q "$WORKSITE_TIP_STORAGE_ROOT"; then
++  die "worksite tip storage root must not be a nested mount"
++fi
++[[ "$(stat -c '%d' -- "$WORKSITE_TIP_STORAGE_ROOT")" \
++  == "$(stat -c '%d' -- "$DATA_MOUNT_ROOT")" ]] \
++  || die "worksite tip storage root is not on the persistent data filesystem"
++[[ "$(stat -c '%u:%g' -- "$WORKSITE_TIP_STORAGE_ROOT")" \
++  == "$(id -u "$WEB_SERVICE_USER"):$(id -g "$WEB_SERVICE_USER")" ]] \
++  || die "worksite tip storage root must belong to the web service account"
++[[ "$(stat -c '%a' -- "$WORKSITE_TIP_STORAGE_ROOT")" == "700" ]] \
++  || die "worksite tip storage root mode must be exactly 0700"
++for access_mode in -r -w -x; do
++  runuser -u "$WEB_SERVICE_USER" -- test "$access_mode" "$WORKSITE_TIP_STORAGE_ROOT" \
++    || die "web service account lacks $access_mode access to worksite tip storage"
++done
++for service_user in "$DB_SERVICE_USER" "$RAG_SERVICE_USER" "$CONTRACT_SERVICE_USER"; do
++  for access_mode in -r -w -x; do
++    if runuser -u "$service_user" -- test "$access_mode" "$WORKSITE_TIP_STORAGE_ROOT"; then
++      die "$service_user can access private worksite tip storage ($access_mode)"
++    fi
++  done
++done
++
++tip_storage_finding="$(find -P "$WORKSITE_TIP_STORAGE_ROOT" -mindepth 1 \
++  \( ! -user "$WEB_SERVICE_USER" -o ! -group "$WEB_SERVICE_GROUP" \) -print -quit)" \
++  || die "could not inspect worksite tip storage ownership"
++[[ -z "$tip_storage_finding" ]] \
++  || die "worksite tip storage contains an entry owned by another account: $tip_storage_finding"
++tip_storage_finding="$(find -P "$WORKSITE_TIP_STORAGE_ROOT" -mindepth 1 \
++  ! -type f ! -type d -print -quit)" \
++  || die "could not inspect worksite tip storage entry types"
++[[ -z "$tip_storage_finding" ]] \
++  || die "worksite tip storage contains a forbidden special entry: $tip_storage_finding"
++tip_storage_finding="$(find -P "$WORKSITE_TIP_STORAGE_ROOT" -type d ! -perm 0700 -print -quit)" \
++  || die "could not inspect worksite tip storage directory modes"
++[[ -z "$tip_storage_finding" ]] \
++  || die "worksite tip storage directory mode must be exactly 0700: $tip_storage_finding"
++tip_storage_finding="$(find -P "$WORKSITE_TIP_STORAGE_ROOT" -type f ! -perm 0600 -print -quit)" \
++  || die "could not inspect worksite tip storage file modes"
++[[ -z "$tip_storage_finding" ]] \
++  || die "worksite tip storage file mode must be exactly 0600: $tip_storage_finding"
++
+ # Run the verifier itself with the trusted host interpreter in isolated mode.
+ # Starting it with the target venv would execute a malicious .pth or
+ # sitecustomize hook before that same environment could be inspected.
+@@ -735,7 +791,8 @@ for unit_name in "${UNIT_NAMES[@]}"; do
+       expected_group="$WEB_SERVICE_GROUP"
+       expected_env_file="$WEB_ENV_FILE"
+       expected_read_only_paths="$PROJECT_ROOT"
+-      # web 은 Next.js 캐시 한 칸에만 쓴다. 이 값은 moneyworry-web.service.in 의
++      # web 은 Next.js 캐시와 현장 제보 영구 저장소에만 쓴다. 이 값은
++      # moneyworry-web.service.in 의
+       # ReadWritePaths 와 **글자 그대로** 같아야 한다 — systemctl show 는 '-'
+       # 접두사도 그대로 돌려주므로 여기에도 있어야 한다.
+       #
+@@ -743,7 +800,7 @@ for unit_name in "${UNIT_NAMES[@]}"; do
+       # "effective systemd ReadWritePaths differ from the sealed unit" 으로
+       # 죽었다. CI 는 install-systemd-units.sh 를 실행하지 않고 bash -n 만
+       # 돌려서 잡히지 않았다. 이제 테스트가 둘을 묶는다.
+-      expected_read_write_paths="-$PROJECT_ROOT/product/.next/cache"
++      expected_read_write_paths="-$PROJECT_ROOT/product/.next/cache $WORKSITE_TIP_STORAGE_ROOT"
+       ;;
+     moneyworry-rag)
+       expected_user="$RAG_SERVICE_USER"
+diff --git a/infra/scripts/validate-service-envs.py b/infra/scripts/validate-service-envs.py
+index 1c7461c..f28e803 100644
+--- a/infra/scripts/validate-service-envs.py
++++ b/infra/scripts/validate-service-envs.py
+@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
+ 
+ IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*")
+ KEY = re.compile(r"[A-Z_][A-Z0-9_]*")
++WORKSITE_TIP_STORAGE_ROOT = "/srv/moneyworry/worksite-tip-media"
+ 
+ 
+ def fail(message: str) -> None:
+@@ -162,8 +163,13 @@ def validate_bot_url(candidate: str, db: dict[str, str]) -> None:
+     require_secret(unquote(parsed.password or ""), "web.env bot password", 24)
+ 
+ 
+-def validate_write_role_url(candidate: str, db: dict[str, str], label: str) -> None:
+-    """인증·커뮤니티 쓰기 롤 연결 문자열.
++def validate_write_role_url(
++    candidate: str,
++    db: dict[str, str],
++    label: str,
++    expected_username: str | None = None,
++) -> None:
++    """인증·커뮤니티·현장 제보 쓰기 롤 연결 문자열.
+ 
+     소유자(DB_USER)나 읽기 전용(BOT_USER)으로 붙는 것을 막는 것이 이 검사의 요점이다.
+     앱이 조용히 전체 권한 계정으로 붙으면 롤을 분리한 이유가 통째로 사라진다.
+@@ -190,6 +196,8 @@ def validate_write_role_url(candidate: str, db: dict[str, str], label: str) -> N
+         fail(f"web.env {label} is not a pinned loopback write-role URL")
+     if username in {db["DB_USER"], db["BOT_USER"]}:
+         fail(f"web.env {label} must not reuse the owner or read-only role: {username}")
++    if expected_username is not None and username != expected_username:
++        fail(f"web.env {label} must use the dedicated {expected_username} role")
+     require_secret(unquote(parsed.password or ""), f"web.env {label} password", 24)
+ 
+ 
+@@ -204,27 +212,41 @@ def validate_user_data_modes(web: dict[str, str], db: dict[str, str]) -> None:
+         if key not in web:
+             fail(f"web.env must define {key} explicitly (it falls back to APP_DATA_MODE=real)")
+ 
+-    for key in ("AUTH_DATA_MODE", "COMMUNITY_DATA_MODE"):
++    for key in ("AUTH_DATA_MODE", "COMMUNITY_DATA_MODE", "WORKSITE_TIP_DATA_MODE"):
+         if web[key] not in {"real", "mock"}:
+             fail(f"web.env {key} must be real or mock")
+ 
+-    # 현장 제보에는 아직 real 어댑터가 없다. worksiteTipService.ensureMockMode() 가
+-    # mock 이 아니면 503 을 던진다. 나연의 저장소 어댑터가 들어오면 이 검사를 푼다.
+-    if web["WORKSITE_TIP_DATA_MODE"] != "mock":
+-        fail("web.env WORKSITE_TIP_DATA_MODE must be mock until the real tip adapter ships")
++    if web["WORKSITE_TIP_DATA_MODE"] == "real" and web["AUTH_DATA_MODE"] != "real":
++        fail(
++            "web.env AUTH_DATA_MODE must be real when "
++            "WORKSITE_TIP_DATA_MODE=real (reporter_id references the real users table)"
++        )
+ 
+     pairs = (
+-        ("AUTH_DATA_MODE", "AUTH_DATABASE_URL"),
+-        ("COMMUNITY_DATA_MODE", "COMMUNITY_DATABASE_URL"),
++        ("AUTH_DATA_MODE", "AUTH_DATABASE_URL", None),
++        ("COMMUNITY_DATA_MODE", "COMMUNITY_DATABASE_URL", None),
++        ("WORKSITE_TIP_DATA_MODE", "TIP_DATABASE_URL", "wg_tip"),
+     )
+-    for mode_key, url_key in pairs:
++    for mode_key, url_key, expected_username in pairs:
+         if web[mode_key] == "real":
+             if not web.get(url_key, "").strip():
+                 fail(f"web.env {url_key} is required when {mode_key}=real")
+-            validate_write_role_url(web[url_key], db, url_key)
++            validate_write_role_url(web[url_key], db, url_key, expected_username)
+         elif web.get(url_key, "").strip():
+             fail(f"web.env {url_key} must be absent when {mode_key}=mock")
+ 
++    if web["WORKSITE_TIP_DATA_MODE"] == "real":
++        if web.get("WORKSITE_TIP_STORAGE_ROOT") != WORKSITE_TIP_STORAGE_ROOT:
++            fail(
++                "web.env WORKSITE_TIP_STORAGE_ROOT must be exactly "
++                f"{WORKSITE_TIP_STORAGE_ROOT} when WORKSITE_TIP_DATA_MODE=real"
++            )
++    elif web.get("WORKSITE_TIP_STORAGE_ROOT", "").strip():
++        fail(
++            "web.env WORKSITE_TIP_STORAGE_ROOT must be absent when "
++            "WORKSITE_TIP_DATA_MODE=mock"
++        )
++
+     mock_secrets = (
+         "MOCK_AUTH_USER_PASSWORD",
+         "MOCK_AUTH_ADMIN_PASSWORD",
+@@ -341,6 +363,8 @@ def validate_web(web: dict[str, str], db: dict[str, str]) -> None:
+             "WORKSITE_TIP_DATA_MODE",
+             "AUTH_DATABASE_URL",
+             "COMMUNITY_DATABASE_URL",
++            "TIP_DATABASE_URL",
++            "WORKSITE_TIP_STORAGE_ROOT",
+             "MOCK_AUTH_USER_PASSWORD",
+             "MOCK_AUTH_ADMIN_PASSWORD",
+             "MOCK_AUTH_INSPECTOR_PASSWORD",
+diff --git a/infra/systemd/ENVIRONMENT_FILES.md b/infra/systemd/ENVIRONMENT_FILES.md
+index 95a4aa4..879f060 100644
+--- a/infra/systemd/ENVIRONMENT_FILES.md
++++ b/infra/systemd/ENVIRONMENT_FILES.md
+@@ -27,6 +27,13 @@ CONTRACT_ANALYSIS_URL=http://127.0.0.1:8000
+ RAG_INTERNAL_TOKEN=<RAG_INTERNAL_SECRET>
+ CONTRACT_INTERNAL_TOKEN=<CONTRACT_INTERNAL_SECRET>
+ APP_DATA_MODE=real
++AUTH_DATA_MODE=real
++COMMUNITY_DATA_MODE=real
++WORKSITE_TIP_DATA_MODE=real
++AUTH_DATABASE_URL=postgresql://wg_auth:<URL_ENCODED_AUTH_SECRET>@127.0.0.1:5433/wageguard?sslmode=disable
++COMMUNITY_DATABASE_URL=postgresql://wg_community:<URL_ENCODED_COMMUNITY_SECRET>@127.0.0.1:5433/wageguard?sslmode=disable
++TIP_DATABASE_URL=postgresql://wg_tip:<URL_ENCODED_TIP_SECRET>@127.0.0.1:5433/wageguard?sslmode=disable
++WORKSITE_TIP_STORAGE_ROOT=/srv/moneyworry/worksite-tip-media
+ CHAT_EXECUTION_MODE=dual_api
+ UPSTAGE_API_KEY=<UPSTAGE_SECRET>
+ SKT_API_KEY=<SKT_SECRET>
+@@ -74,7 +81,7 @@ CONTRACT_INTERNAL_TOKEN=<CONTRACT_INTERNAL_SECRET>
+ 금지된다. 전용 token은 `web.env`의 같은 이름 값과 일치하고 RAG token과 달라야 한다. 위 목록 외의 endpoint override도 거부한다. production unit이 두 file fallback을
+ `/dev/null`로 고정하며 로그·계약서 캐시는 비활성화한다.
+ 
+-## 인증·커뮤니티·현장 제보 (2026-09-11 추가)
++## 인증·커뮤니티·현장 제보
+ 
+ PR #40·#45 로 `web.env` 에 키가 늘었다. **세 모드 키는 생략할 수 없다** —
+ 생략하면 `APP_DATA_MODE=real` 을 따라가는데, 연결 문자열 없이 real 이 되면
+@@ -84,13 +91,26 @@ PR #40·#45 로 `web.env` 에 키가 늘었다. **세 모드 키는 생략할 
+ | --- | --- | --- |
+ | `AUTH_DATA_MODE` | `real` 또는 `mock` | real 이면 `AUTH_DATABASE_URL` 필수 |
+ | `COMMUNITY_DATA_MODE` | `real` 또는 `mock` | real 이면 `COMMUNITY_DATABASE_URL` 필수 |
+-| `WORKSITE_TIP_DATA_MODE` | **`mock` 고정** | real 어댑터가 아직 없다. `worksiteTipService.ensureMockMode()` 가 503 을 던진다 |
++| `WORKSITE_TIP_DATA_MODE` | `real` 또는 `mock` | real 이면 `TIP_DATABASE_URL`과 고정 저장 경로 필수 |
+ | `AUTH_DATABASE_URL` | `postgresql://wg_auth:…@127.0.0.1:5433/wageguard?sslmode=disable` | mock 일 때는 **두면 안 된다** |
+ | `COMMUNITY_DATABASE_URL` | `postgresql://wg_community:…@127.0.0.1:5433/wageguard?sslmode=disable` | 〃 |
++| `TIP_DATABASE_URL` | `postgresql://wg_tip:…@127.0.0.1:5433/wageguard?sslmode=disable` | 〃 |
++| `WORKSITE_TIP_STORAGE_ROOT` | `/srv/moneyworry/worksite-tip-media` | 현장 제보 real 일 때만 사용하며 다른 경로는 거부 |
+ | `MOCK_AUTH_*_PASSWORD` 3종 | mock 일 때만 | real 로 바꾸면 **지워야 한다** |
+ 
++현장 제보 real 저장의 `reporter_id`는 실제 `users` 행을 참조하므로
++`WORKSITE_TIP_DATA_MODE=real`이면 `AUTH_DATA_MODE`도 반드시 `real`이어야 한다.
++
+ 쓰기 롤 URL 은 **소유자(`DB_USER`)나 읽기 전용(`BOT_USER`)을 쓸 수 없다.** 검증기가 막는다.
+ 앱이 조용히 전체 권한 계정으로 붙으면 롤을 분리한 이유가 사라지기 때문이고,
+ `product/src/server/databaseConfig.ts` 도 같은 이유로 소유자 URL 대체를 거부한다.
+ 
+-비밀번호는 `db/.env.local` 의 `AUTH_PASSWORD`·`COMMUNITY_PASSWORD` 다.
++비밀번호 원본은 운영 secret 전달 경로에서 받아 URL component로 percent-encode한다. 저장소나
++명령행에는 넣지 않는다. 현장 제보 DB 롤은 `wg_tip`으로 고정되며 다른 쓰기 롤을 대신 넣어도
++검증기가 거부한다.
++
++현장 제보 저장소는 PostgreSQL 행과 파일을 함께 사용한다. DB에는 제보·첨부 메타데이터와
++`storage_key`, SHA-256을 저장하고, 사진 원본과 EXIF를 제거한 검사관용 사본은 데이터 디스크의
++`/srv/moneyworry/worksite-tip-media` 아래에 저장한다. systemd는 웹 프로세스에 이 경로만 추가로
++쓰기 허용한다. 설치기는 경로를 웹 서비스 계정 소유 `0700`으로 만들고, 하위 디렉터리 `0700`,
++파일 `0600`, symlink·특수 파일 없음, 다른 세 서비스 계정의 접근 불가를 시작 전에 확인한다.
+diff --git a/infra/systemd/moneyworry-web.service.in b/infra/systemd/moneyworry-web.service.in
+index aef039a..45bb09e 100644
+--- a/infra/systemd/moneyworry-web.service.in
++++ b/infra/systemd/moneyworry-web.service.in
+@@ -40,6 +40,8 @@ ReadOnlyPaths=@PROJECT_ROOT@
+ # '-' 접두사: 경로가 없어도 유닛이 기동에 실패하지 않게 한다. 첫 빌드 전이나
+ # 손으로 .next 를 지운 직후가 그런 상태다. 디렉터리는 배포기가 만든다.
+ ReadWritePaths=-@PROJECT_ROOT@/product/.next/cache
++# 현장 제보 원본과 개인정보를 제거한 감독관용 사본은 영구 데이터 디스크에 쓴다.
++ReadWritePaths=/srv/moneyworry/worksite-tip-media
+ RestrictSUIDSGID=yes
+ UMask=0027
+ LimitNOFILE=65536
+diff --git a/infra/tests/test_deploy_automation.py b/infra/tests/test_deploy_automation.py
+index 273a80f..6cc7a06 100644
+--- a/infra/tests/test_deploy_automation.py
++++ b/infra/tests/test_deploy_automation.py
+@@ -425,16 +425,22 @@ class UnitTests(unittest.TestCase):
+         self.assertIn("StateDirectory=moneyworry-deploy", SERVICE_SRC)
+ 
+ 
+-class WebCacheTests(unittest.TestCase):
+-    """4-F: web 유닛이 프로젝트 트리에 아무것도 쓸 수 없었다."""
++class WebWritablePathsTests(unittest.TestCase):
++    """web 유닛은 캐시와 현장 제보 영구 저장소에만 쓴다."""
+ 
+     WEB = ROOT / "infra" / "systemd" / "moneyworry-web.service.in"
+     DEPLOY = ROOT / "infra" / "scripts" / "deploy-from-git.sh"
+ 
+-    def test_only_the_cache_directory_is_writable(self) -> None:
++    def test_only_the_required_runtime_paths_are_writable(self) -> None:
+         text = self.WEB.read_text(encoding="utf-8")
+         opened = re.findall(r"(?m)^ReadWritePaths=(.+)$", text)
+-        self.assertEqual(opened, ["-@PROJECT_ROOT@/product/.next/cache"])
++        self.assertEqual(
++            opened,
++            [
++                "-@PROJECT_ROOT@/product/.next/cache",
++                "/srv/moneyworry/worksite-tip-media",
++            ],
++        )
+ 
+     def test_missing_cache_directory_does_not_break_startup(self) -> None:
+         """첫 빌드 전에는 .next 가 없다. '-' 접두사가 그때 유닛을 살린다."""
+@@ -465,7 +471,11 @@ class WebCacheTests(unittest.TestCase):
+         self.assertIsNotNone(match, "설치기에서 web 의 기대값을 찾지 못했습니다")
+ 
+         # 설치기는 $PROJECT_ROOT, 템플릿은 @PROJECT_ROOT@ 를 쓴다. 그것만 맞춘다.
+-        expected = match.group(1).replace("$PROJECT_ROOT", "@PROJECT_ROOT@")
++        expected = (
++            match.group(1)
++            .replace("$PROJECT_ROOT", "@PROJECT_ROOT@")
++            .replace("$WORKSITE_TIP_STORAGE_ROOT", "/srv/moneyworry/worksite-tip-media")
++        )
+         self.assertEqual(
+             expected, " ".join(from_template),
+             "install-systemd-units.sh 의 봉인 기대값과 moneyworry-web.service.in 의 "
+diff --git a/infra/tests/test_systemd_templates.py b/infra/tests/test_systemd_templates.py
+index 0d663f2..599b018 100644
+--- a/infra/tests/test_systemd_templates.py
++++ b/infra/tests/test_systemd_templates.py
+@@ -1,19 +1,26 @@
+ from __future__ import annotations
+ 
++import os
+ import subprocess
+ import re
++import shutil
+ import unittest
+ from pathlib import Path
+ 
+ 
+ ROOT = Path(__file__).resolve().parents[2]
+ INFRA = ROOT / "infra"
++BASH = (
++    r"C:\Program Files\Git\bin\bash.exe"
++    if os.name == "nt" and Path(r"C:\Program Files\Git\bin\bash.exe").is_file()
++    else shutil.which("bash") or "bash"
++)
+ 
+ 
+ class SystemdPrivilegeBoundaryTests(unittest.TestCase):
+     def test_installer_is_valid_bash_and_has_no_legacy_shared_variables(self) -> None:
+         result = subprocess.run(
+-            ["bash", "-n", str(INFRA / "scripts" / "install-systemd-units.sh")],
++            [BASH, "-n", str(INFRA / "scripts" / "install-systemd-units.sh")],
+             capture_output=True,
+             text=True,
+             check=False,
+@@ -67,7 +74,7 @@ class SystemdPrivilegeBoundaryTests(unittest.TestCase):
+             "/run/user/1000/fnm/node",
+         ):
+             result = subprocess.run(
+-                ["bash", "-c", harness, "node-gate", bad_path],
++                [BASH, "-c", harness, "node-gate", bad_path],
+                 capture_output=True,
+                 text=True,
+                 check=False,
+@@ -75,7 +82,7 @@ class SystemdPrivilegeBoundaryTests(unittest.TestCase):
+             self.assertEqual(result.returncode, 97, bad_path)
+         for allowed_path in ("/usr/bin/node", "/usr/local/bin/node", "/opt/node/bin/node"):
+             result = subprocess.run(
+-                ["bash", "-c", harness, "node-gate", allowed_path],
++                [BASH, "-c", harness, "node-gate", allowed_path],
+                 capture_output=True,
+                 text=True,
+                 check=False,
+@@ -180,6 +187,32 @@ class SystemdPrivilegeBoundaryTests(unittest.TestCase):
+         self.assertIn("ReadWritePaths=/run/moneyworry-rag", rag)
+         self.assertIn("Environment=RAG_DB_PATH=/run/moneyworry-rag/chroma", rag)
+         self.assertIn("RuntimeDirectory=moneyworry-rag", rag)
++        web = (INFRA / "systemd" / "moneyworry-web.service.in").read_text(
++            encoding="utf-8"
++        )
++        self.assertIn(
++            "ReadWritePaths=/srv/moneyworry/worksite-tip-media",
++            web,
++        )
++
++    def test_installer_prepares_and_attests_private_persistent_tip_storage(self) -> None:
++        installer = (INFRA / "scripts" / "install-systemd-units.sh").read_text(
++            encoding="utf-8"
++        )
++        for token in (
++            'WORKSITE_TIP_STORAGE_ROOT="/srv/moneyworry/worksite-tip-media"',
++            'if [[ ! -e "$WORKSITE_TIP_STORAGE_ROOT" ]]; then',
++            'install -d -o "$WEB_SERVICE_USER" -g "$WEB_SERVICE_GROUP" -m 0700',
++            "worksite tip storage root must not be a nested mount",
++            "worksite tip storage root is not on the persistent data filesystem",
++            "worksite tip storage root must belong to the web service account",
++            "worksite tip storage root mode must be exactly 0700",
++            "can access private worksite tip storage",
++            'find -P "$WORKSITE_TIP_STORAGE_ROOT" -mindepth 1',
++            "worksite tip storage file mode must be exactly 0600",
++            'expected_read_write_paths="-$PROJECT_ROOT/product/.next/cache $WORKSITE_TIP_STORAGE_ROOT"',
++        ):
++            self.assertIn(token, installer)
+ 
+     def test_rag_unit_pins_offline_assets_and_runs_integrity_preflight(self) -> None:
+         rag = (INFRA / "systemd" / "moneyworry-rag.service.in").read_text(encoding="utf-8")
+diff --git a/infra/tests/test_validate_service_envs.py b/infra/tests/test_validate_service_envs.py
+index d1b5213..fc08e21 100644
+--- a/infra/tests/test_validate_service_envs.py
++++ b/infra/tests/test_validate_service_envs.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ 
+ import subprocess
++import sys
+ import tempfile
+ import unittest
+ from pathlib import Path
+@@ -39,9 +40,11 @@ DEMO_BASIC_AUTH_PASSWORD=BasicValue_6vT2pN9xQ4mK
+ SAVE_COMPARISON_FEEDBACK=false
+ AUTH_DATA_MODE=real
+ COMMUNITY_DATA_MODE=real
+-WORKSITE_TIP_DATA_MODE=mock
++WORKSITE_TIP_DATA_MODE=real
+ AUTH_DATABASE_URL=postgresql://wg_auth:AuthValue_8xM4qT7vP2nR9kL3sC6w@127.0.0.1:5433/wageguard?sslmode=disable
+ COMMUNITY_DATABASE_URL=postgresql://wg_community:CommValue_3zK9wL5mQ8tN2xP7rV4s@127.0.0.1:5433/wageguard?sslmode=disable
++TIP_DATABASE_URL=postgresql://wg_tip:TipValue_6mR3xP8vN2qK7tL5wC9s@127.0.0.1:5433/wageguard?sslmode=disable
++WORKSITE_TIP_STORAGE_ROOT=/srv/moneyworry/worksite-tip-media
+ """,
+             "rag": "RAG_DEVICE=cpu\nRAG_GUNICORN_THREADS=2\nRAG_INTERNAL_TOKEN=RagInternal_7pQ2mV9xR4tK8nC3sL6wF\n",
+             "contract": """\
+@@ -65,7 +68,7 @@ CONTRACT_INTERNAL_TOKEN=ContractInternal_5vN8qT2xM7kP4zC9rL6sW
+             paths[name] = path
+         return subprocess.run(
+             [
+-                "python3",
++                sys.executable,
+                 str(VALIDATOR),
+                 "--db-env",
+                 str(paths["db"]),
+@@ -88,6 +91,7 @@ CONTRACT_INTERNAL_TOKEN=ContractInternal_5vN8qT2xM7kP4zC9rL6sW
+             "AdminValue_8eQ2pR7xT4mN9kLs",
+             "BotValue_3qW8nM5vR2zK7pTx",
+             "BasicValue_6vT2pN9xQ4mK",
++            "TipValue_6mR3xP8vN2qK7tL5wC9s",
+         ):
+             self.assertNotIn(marker, combined)
+ 
+@@ -297,18 +301,92 @@ CONTRACT_INTERNAL_TOKEN=ContractInternal_5vN8qT2xM7kP4zC9rL6sW
+         self.assertNotEqual(result.returncode, 0)
+         self.assertIn("is not a pinned loopback write-role URL", result.stderr)
+ 
+-    def test_worksite_tip_must_stay_mock(self):
+-        """real 어댑터가 아직 없다. ensureMockMode() 가 503 을 던진다."""
+-        web = self.values["web"].replace("WORKSITE_TIP_DATA_MODE=mock", "WORKSITE_TIP_DATA_MODE=real")
++    def test_real_worksite_tip_requires_dedicated_url_and_storage_root(self):
++        for key in ("TIP_DATABASE_URL", "WORKSITE_TIP_STORAGE_ROOT"):
++            web = "\n".join(
++                line for line in self.values["web"].splitlines()
++                if not line.startswith(f"{key}=")
++            ) + "\n"
++            result = self.run_validator({"web": web})
++            self.assert_failed_without_secret(result)
++            self.assertIn(key, result.stderr)
++
++    def test_real_worksite_tip_requires_real_auth_reporters(self):
++        web = self.values["web"].replace("AUTH_DATA_MODE=real", "AUTH_DATA_MODE=mock")
+         result = self.run_validator({"web": web})
+-        self.assertNotEqual(result.returncode, 0)
+-        self.assertIn("WORKSITE_TIP_DATA_MODE must be mock", result.stderr)
++        self.assert_failed_without_secret(result)
++        self.assertIn(
++            "AUTH_DATA_MODE must be real when WORKSITE_TIP_DATA_MODE=real",
++            result.stderr,
++        )
++
++    def test_tip_url_requires_exact_dedicated_role(self):
++        for role in ("pathb_admin", "wg_bot", "wg_community"):
++            web = self.values["web"].replace(
++                "postgresql://wg_tip:", f"postgresql://{role}:"
++            )
++            result = self.run_validator({"web": web})
++            self.assert_failed_without_secret(result)
++            if role in {"pathb_admin", "wg_bot"}:
++                self.assertIn("must not reuse the owner or read-only role", result.stderr)
++            else:
++                self.assertIn("must use the dedicated wg_tip role", result.stderr)
++
++    def test_tip_url_must_be_pinned_loopback(self):
++        web = self.values["web"].replace(
++            "wg_tip:TipValue_6mR3xP8vN2qK7tL5wC9s@127.0.0.1:5433/",
++            "wg_tip:TipValue_6mR3xP8vN2qK7tL5wC9s@10.20.0.5:5433/",
++        )
++        result = self.run_validator({"web": web})
++        self.assert_failed_without_secret(result)
++        self.assertIn("TIP_DATABASE_URL is not a pinned loopback write-role URL", result.stderr)
++
++    def test_real_worksite_tip_requires_exact_storage_path(self):
++        web = self.values["web"].replace(
++            "WORKSITE_TIP_STORAGE_ROOT=/srv/moneyworry/worksite-tip-media",
++            "WORKSITE_TIP_STORAGE_ROOT=/tmp/worksite-tip-media",
++        )
++        result = self.run_validator({"web": web})
++        self.assert_failed_without_secret(result)
++        self.assertIn("WORKSITE_TIP_STORAGE_ROOT must be exactly", result.stderr)
++
++    def test_mock_worksite_tip_rejects_real_storage_configuration(self):
++        web = self.values["web"].replace(
++            "WORKSITE_TIP_DATA_MODE=real", "WORKSITE_TIP_DATA_MODE=mock"
++        )
++        result = self.run_validator({"web": web})
++        self.assert_failed_without_secret(result)
++        self.assertIn("TIP_DATABASE_URL must be absent", result.stderr)
++
++        web = "\n".join(
++            line for line in web.splitlines()
++            if not line.startswith("TIP_DATABASE_URL=")
++        ) + "\n"
++        result = self.run_validator({"web": web})
++        self.assert_failed_without_secret(result)
++        self.assertIn("WORKSITE_TIP_STORAGE_ROOT must be absent", result.stderr)
++
++    def test_mock_worksite_tip_without_real_configuration_is_valid(self):
++        web = self.values["web"].replace(
++            "WORKSITE_TIP_DATA_MODE=real", "WORKSITE_TIP_DATA_MODE=mock"
++        )
++        web = "\n".join(
++            line for line in web.splitlines()
++            if not line.startswith(("TIP_DATABASE_URL=", "WORKSITE_TIP_STORAGE_ROOT="))
++        ) + "\n"
++        result = self.run_validator({"web": web})
++        self.assertEqual(result.returncode, 0, result.stderr)
+ 
+     def test_mock_auth_requires_mock_passwords(self):
+         web = self.values["web"].replace("AUTH_DATA_MODE=real", "AUTH_DATA_MODE=mock")
++        web = web.replace("WORKSITE_TIP_DATA_MODE=real", "WORKSITE_TIP_DATA_MODE=mock")
+         web = "\n".join(
+             line for line in web.splitlines() if not line.startswith("AUTH_DATABASE_URL=")
+         ) + "\n"
++        web = "\n".join(
++            line for line in web.splitlines()
++            if not line.startswith(("TIP_DATABASE_URL=", "WORKSITE_TIP_STORAGE_ROOT="))
++        ) + "\n"
+         result = self.run_validator({"web": web})
+         self.assertNotEqual(result.returncode, 0)
+         self.assertIn("MOCK_AUTH_USER_PASSWORD is required", result.stderr)
+@@ -322,6 +400,11 @@ CONTRACT_INTERNAL_TOKEN=ContractInternal_5vN8qT2xM7kP4zC9rL6sW
+ 
+     def test_mock_auth_rejects_database_url(self):
+         web = self.values["web"].replace("AUTH_DATA_MODE=real", "AUTH_DATA_MODE=mock")
++        web = web.replace("WORKSITE_TIP_DATA_MODE=real", "WORKSITE_TIP_DATA_MODE=mock")
++        web = "\n".join(
++            line for line in web.splitlines()
++            if not line.startswith(("TIP_DATABASE_URL=", "WORKSITE_TIP_STORAGE_ROOT="))
++        ) + "\n"
+         for key in ("MOCK_AUTH_USER_PASSWORD", "MOCK_AUTH_ADMIN_PASSWORD", "MOCK_AUTH_INSPECTOR_PASSWORD"):
+             web += f"{key}=MockValue_7pQ2mV9xR4tK\n"
+         result = self.run_validator({"web": web})
+diff --git a/product/.env.example b/product/.env.example
+index 1d9200f..bf98446 100644
+--- a/product/.env.example
++++ b/product/.env.example
+@@ -4,14 +4,10 @@ APP_DATA_MODE=real
+ COMPANY_DATA_MODE=real
+ CONTRACT_DATA_MODE=real
+ 
+-# 인증·커뮤니티·신고는 실제 DB 연결 작업이 끝나기 전까지 mock을 명시합니다.
+-# 이 두 줄을 지우면 APP_DATA_MODE=real을 따라가 로그인이 503으로 실패합니다.
++# 인증·커뮤니티·현장 제보는 각 실저장 연결 작업이 끝나기 전까지 mock을 명시합니다.
++# 이 세 줄을 지우면 APP_DATA_MODE=real을 따라가 해당 기능이 503으로 실패합니다.
+ AUTH_DATA_MODE=mock
+ COMMUNITY_DATA_MODE=mock
+-
+-# 현장 제보는 저장소 설계가 끝나지 않았습니다 — 반드시 mock을 명시합니다.
+-# 생략하면 APP_DATA_MODE=real을 따라가고, 실제 저장소가 없어
+-# 제보 접수·조회가 전부 503으로 실패합니다(Mock 성공으로 위장하지 않는 설계).
+ WORKSITE_TIP_DATA_MODE=mock
+ 
+ # mock 인증 계정의 비밀번호입니다. AUTH_DATA_MODE=mock 일 때만 사용합니다.
+@@ -28,14 +24,18 @@ BOT_DATABASE_URL=
+ DATABASE_URL=
+ DB_SSL=false
+ 
+-# 사용자 데이터(회원·세션·게시글·신고)를 쓰는 계정입니다.
++# 사용자 데이터(회원·세션·게시글·신고·현장 제보)를 쓰는 계정입니다.
+ # 위의 읽기 전용 계정과 역할이 다르므로 같은 값을 넣지 않습니다.
+-# db/scripts/create-auth-role.sh · create-community-role.sh 로 만듭니다.
++# db/scripts/create-auth-role.sh · create-community-role.sh · create-tip-role.sh 로 만듭니다.
+ #
+ # 둘은 서로의 테이블을 볼 수 없습니다 — 인증 계정은 게시글을, 커뮤니티 계정은
+ # 회원을 읽지 못합니다. 비워두면 소유자 계정으로 대체되지 않고 연결이 거부됩니다.
+ AUTH_DATABASE_URL=
+ COMMUNITY_DATABASE_URL=
++TIP_DATABASE_URL=
++# Real 현장 제보 사진의 비공개 저장 루트입니다. 운영 GCP에서는
++# /srv/moneyworry/worksite-tip-media 로 고정하며 Mock 모드에서는 비워 둡니다.
++WORKSITE_TIP_STORAGE_ROOT=
+ 
+ # 내부 서비스 주소입니다. 브라우저는 이 주소를 직접 호출하지 않습니다.
+ RAG_API_URL=http://127.0.0.1:5051
+diff --git a/product/docs/api-contract.md b/product/docs/api-contract.md
+index 31df44e..e6e012b 100644
+--- a/product/docs/api-contract.md
++++ b/product/docs/api-contract.md
+@@ -356,7 +356,7 @@ API도 `confirm_external_context: true`가 없으면 호출을 거부한다. 응
+ | `413` | 계약서 크기 초과 |
+ | `415` | 계약서 형식 미지원 |
+ | `422` | 근로계약서로 확인할 수 없는 문서 |
+-| `429` | 외부 공급자 요청 제한 |
++| `429` | 로그인 임시 잠금 또는 외부 공급자 요청 제한. 로그인 잠금은 `Retry-After` 포함 |
+ | `500` | 내부 오류 |
+ | `502` | 내부 분석 서비스의 잘못된 응답 |
+ | `503` | DB·RAG·분석 공급자 사용 불가 |
+diff --git a/product/next.config.ts b/product/next.config.ts
+index e5fbb54..d1fa0bd 100644
+--- a/product/next.config.ts
++++ b/product/next.config.ts
+@@ -17,6 +17,7 @@ const nextConfig: NextConfig = {
+     unoptimized: true,
+   },
+   experimental: {
++    authInterrupts: true,
+     // The server environment drops captured stdout from Next's detached tsc child process.
+     // Use the TypeScript compiler API so production builds still run the same type checks.
+     useTypeScriptCli: false,
+diff --git a/product/src/app/api/health/ready/route.test.ts b/product/src/app/api/health/ready/route.test.ts
+index 86420b4..8e9ec11 100644
+--- a/product/src/app/api/health/ready/route.test.ts
++++ b/product/src/app/api/health/ready/route.test.ts
+@@ -1,11 +1,16 @@
+ import { afterEach, describe, expect, it, vi } from "vitest";
+ 
+-const state = vi.hoisted(() => ({ database: true }));
++const state = vi.hoisted(() => ({ database: true, worksiteTip: true }));
+ 
+ vi.mock("server-only", () => ({}));
+ vi.mock("@/server/postgres", () => ({
+   isDatabaseReady: async () => state.database,
+ }));
++vi.mock("@/services/userDataProviders", () => ({
++  getWorksiteTipRepository: () => ({
++    isReady: async () => state.worksiteTip,
++  }),
++}));
+ 
+ import { GET, resetReadinessCacheForTests } from "@/app/api/health/ready/route";
+ 
+@@ -50,6 +55,7 @@ afterEach(() => {
+   vi.unstubAllEnvs();
+   vi.unstubAllGlobals();
+   state.database = true;
++  state.worksiteTip = true;
+   resetReadinessCacheForTests();
+ });
+ 
+@@ -91,6 +97,31 @@ describe("GET /api/health/ready", () => {
+     );
+   });
+ 
++  it("현장 제보 실저장 DB·파일 경계가 준비되지 않으면 503을 반환한다", async () => {
++    state.worksiteTip = false;
++    vi.stubEnv("RAG_API_URL", "http://rag.internal");
++    vi.stubEnv("RAG_INTERNAL_TOKEN", "rag-ready-token");
++    vi.stubEnv("CONTRACT_ANALYSIS_URL", "http://contract.internal");
++    vi.stubEnv("CONTRACT_INTERNAL_TOKEN", "contract-ready-token");
++    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
++      const payload = String(input).startsWith("http://rag.internal")
++        ? readyRagHealth
++        : readyContractHealth;
++      return new Response(JSON.stringify(payload), {
++        status: 200,
++        headers: { "Content-Type": "application/json" },
++      });
++    }));
++
++    const response = await GET();
++
++    expect(response.status).toBe(503);
++    await expect(response.json()).resolves.toMatchObject({
++      status: "not_ready",
++      checks: { worksite_tip: false },
++    });
++  });
++
+   it("하나라도 준비되지 않으면 503을 반환하고 외부 LLM은 호출하지 않는다", async () => {
+     state.database = false;
+     vi.stubEnv("RAG_API_URL", "");
+diff --git a/product/src/app/api/health/ready/route.ts b/product/src/app/api/health/ready/route.ts
+index dd8f215..db65f91 100644
+--- a/product/src/app/api/health/ready/route.ts
++++ b/product/src/app/api/health/ready/route.ts
+@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
+ import { isContractHealthReady } from "@/server/contractHealth";
+ import { isDatabaseReady } from "@/server/postgres";
+ import { isRagHealthReady } from "@/server/ragHealth";
++import { getWorksiteTipRepository } from "@/services/userDataProviders";
+ 
+ export const dynamic = "force-dynamic";
+ const READINESS_CACHE_MS = 10_000;
+@@ -11,6 +12,7 @@ type ReadinessChecks = {
+   database: boolean;
+   rag: boolean;
+   contract_analysis: boolean;
++  worksite_tip: boolean;
+ };
+ 
+ let cached: { expiresAt: number; checks: ReadinessChecks } | undefined;
+@@ -35,7 +37,7 @@ async function probe(
+ }
+ 
+ async function evaluateReadiness(): Promise<ReadinessChecks> {
+-  const [database, rag, contractAnalysis] = await Promise.all([
++  const [database, rag, contractAnalysis, worksiteTip] = await Promise.all([
+     isDatabaseReady(),
+     probe(process.env.RAG_API_URL, process.env.RAG_INTERNAL_TOKEN, isRagHealthReady),
+     probe(
+@@ -43,8 +45,14 @@ async function evaluateReadiness(): Promise<ReadinessChecks> {
+       process.env.CONTRACT_INTERNAL_TOKEN,
+       isContractHealthReady,
+     ),
++    getWorksiteTipRepository().isReady(),
+   ]);
+-  return { database, rag, contract_analysis: contractAnalysis };
++  return {
++    database,
++    rag,
++    contract_analysis: contractAnalysis,
++    worksite_tip: worksiteTip,
++  };
+ }
+ 
+ async function getReadinessChecks(): Promise<ReadinessChecks> {
+@@ -70,7 +78,10 @@ export function resetReadinessCacheForTests(): void {
+ 
+ export async function GET(): Promise<NextResponse> {
+   const checks = await getReadinessChecks();
+-  const ready = checks.database && checks.rag && checks.contract_analysis;
++  const ready = checks.database
++    && checks.rag
++    && checks.contract_analysis
++    && checks.worksite_tip;
+ 
+   return NextResponse.json(
+     {
+diff --git a/product/src/app/api/inspector/chat/route.ts b/product/src/app/api/inspector/chat/route.ts
+index 26f88d5..71a19f7 100644
+--- a/product/src/app/api/inspector/chat/route.ts
++++ b/product/src/app/api/inspector/chat/route.ts
+@@ -1,11 +1,13 @@
+ import { NextResponse } from "next/server";
+ import { sendInspectorChatMessage } from "@/services/inspectorService";
++import { requireInspectorRequest } from "@/server/auth/inspectorAccess";
+ import { errorPayload } from "@/utils/errors";
+ 
+ export const dynamic = "force-dynamic";
+ 
+ export async function POST(request: Request): Promise<NextResponse> {
+   try {
++    await requireInspectorRequest(request);
+     const body: unknown = await request.json();
+     return NextResponse.json(await sendInspectorChatMessage(body), {
+       headers: { "Cache-Control": "no-store" },
+diff --git a/product/src/app/api/inspector/companies/[companyId]/route.ts b/product/src/app/api/inspector/companies/[companyId]/route.ts
+index 6e33e1a..782b215 100644
+--- a/product/src/app/api/inspector/companies/[companyId]/route.ts
++++ b/product/src/app/api/inspector/companies/[companyId]/route.ts
+@@ -1,5 +1,6 @@
+ import { NextResponse } from "next/server";
+ import { getInspectorCompanyDetail } from "@/services/inspectorService";
++import { requireInspectorRequest } from "@/server/auth/inspectorAccess";
+ import { errorPayload } from "@/utils/errors";
+ 
+ export const dynamic = "force-dynamic";
+@@ -8,8 +9,9 @@ interface RouteContext {
+   params: Promise<{ companyId: string }>;
+ }
+ 
+-export async function GET(_request: Request, context: RouteContext): Promise<NextResponse> {
++export async function GET(request: Request, context: RouteContext): Promise<NextResponse> {
+   try {
++    await requireInspectorRequest(request);
+     const { companyId } = await context.params;
+     return NextResponse.json(await getInspectorCompanyDetail(decodeURIComponent(companyId)), {
+       headers: { "Cache-Control": "no-store" },
+diff --git a/product/src/app/api/inspector/companies/search/route.ts b/product/src/app/api/inspector/companies/search/route.ts
+index e1979c0..29c2030 100644
+--- a/product/src/app/api/inspector/companies/search/route.ts
++++ b/product/src/app/api/inspector/companies/search/route.ts
+@@ -1,11 +1,13 @@
+ import { NextResponse } from "next/server";
+ import { searchInspectorCompanies } from "@/services/inspectorService";
++import { requireInspectorRequest } from "@/server/auth/inspectorAccess";
+ import { errorPayload } from "@/utils/errors";
+ 
+ export const dynamic = "force-dynamic";
+ 
+ export async function GET(request: Request): Promise<NextResponse> {
+   try {
++    await requireInspectorRequest(request);
+     const url = new URL(request.url);
+     const query = url.searchParams.get("q") ?? "";
+     const limitValue = url.searchParams.get("limit");
+diff --git a/product/src/app/api/inspector/overview/route.ts b/product/src/app/api/inspector/overview/route.ts
+index 05c147d..f55f5bd 100644
+--- a/product/src/app/api/inspector/overview/route.ts
++++ b/product/src/app/api/inspector/overview/route.ts
+@@ -1,11 +1,13 @@
+ import { NextResponse } from "next/server";
+ import { getInspectorOverview } from "@/services/inspectorService";
++import { requireInspectorRequest } from "@/server/auth/inspectorAccess";
+ import { errorPayload } from "@/utils/errors";
+ 
+ export const dynamic = "force-dynamic";
+ 
+ export async function GET(request: Request): Promise<NextResponse> {
+   try {
++    await requireInspectorRequest(request);
+     const url = new URL(request.url);
+     const limitValue = url.searchParams.get("limit");
+     const limit = limitValue === null ? 10 : Number(limitValue);
+diff --git a/product/src/config/dataMode.ts b/product/src/config/dataMode.ts
+index 937247e..ee3b067 100644
+--- a/product/src/config/dataMode.ts
++++ b/product/src/config/dataMode.ts
+@@ -25,6 +25,10 @@ export function getCommunityDataMode(): DataMode {
+   return parseDataMode(process.env.COMMUNITY_DATA_MODE) ?? getDataMode();
+ }
+ 
++export function getWorksiteTipDataMode(): DataMode {
++  return parseDataMode(process.env.WORKSITE_TIP_DATA_MODE) ?? getDataMode();
++}
++
+ export function getMockDelayMs(): number {
+   const parsed = Number(process.env.MOCK_DELAY_MS ?? 250);
+   if (!Number.isFinite(parsed)) return 250;
+diff --git a/product/src/server/databaseConfig.ts b/product/src/server/databaseConfig.ts
+index 642fa02..1186aac 100644
+--- a/product/src/server/databaseConfig.ts
++++ b/product/src/server/databaseConfig.ts
+@@ -56,6 +56,13 @@ export function buildCommunityDatabaseUrl(values: Record<string, string>): strin
+   );
+ }
+ 
++export function buildTipDatabaseUrl(values: Record<string, string>): string | undefined {
++  return (
++    validDirectUrl(values.TIP_DATABASE_URL) ??
++    buildRoleUrl(values, values.TIP_USER, values.TIP_PASSWORD)
++  );
++}
++
+ export function getDatabaseConnectionString(): string | undefined {
+   return (
+     validDirectUrl(process.env.BOT_DATABASE_URL) ??
+@@ -66,7 +73,7 @@ export function getDatabaseConnectionString(): string | undefined {
+ 
+ /*
+  * 쓰기 롤은 DATABASE_URL(소유자 계정)로 절대 대체하지 않는다.
+- * 대체를 허용하면 wg_auth·wg_community 설정을 빠뜨린 환경에서 앱이 조용히
++ * 대체를 허용하면 wg_auth·wg_community·wg_tip 설정을 빠뜨린 환경에서 앱이 조용히
+  * 전체 권한 계정으로 붙어, 나연이 롤을 분리한 이유가 통째로 사라진다.
+  * 설정이 없으면 연결하지 않고 실패하는 편이 안전하다.
+  */
+@@ -80,3 +87,7 @@ export function getCommunityDatabaseConnectionString(): string | undefined {
+     buildCommunityDatabaseUrl(readDatabaseValues())
+   );
+ }
++
++export function getTipDatabaseConnectionString(): string | undefined {
++  return validDirectUrl(process.env.TIP_DATABASE_URL) ?? buildTipDatabaseUrl(readDatabaseValues());
++}
+diff --git a/product/src/server/postgresWrite.ts b/product/src/server/postgresWrite.ts
+index 9fd9fae..4880455 100644
+--- a/product/src/server/postgresWrite.ts
++++ b/product/src/server/postgresWrite.ts
+@@ -2,24 +2,25 @@ import { Pool, type PoolClient, type QueryResultRow } from "pg";
+ import {
+   getAuthDatabaseConnectionString,
+   getCommunityDatabaseConnectionString,
++  getTipDatabaseConnectionString,
+ } from "@/server/databaseConfig";
+ import { ServiceError } from "@/utils/errors";
+ 
+ /*
+- * 사용자 데이터(회원·세션·게시글·신고)를 쓰는 연결 계층.
++ * 사용자 데이터(회원·세션·게시글·신고·현장 제보)를 쓰는 연결 계층.
+  *
+  * server/postgres.ts 와 절대 섞지 않는다. 그쪽은 ML 산출물을 읽는
+  * 읽기 전용 경로이고, 연결 자체가 default_transaction_read_only 로 잠겨 있다.
+  * 여기는 쓰기가 목적이므로 그 잠금이 없다. 한 모듈에서 둘을 다루면
+  * 실수로 읽기 전용 잠금이 풀린 연결로 ML 데이터를 건드릴 수 있다.
+  *
+- * 롤도 둘로 나뉜다. wg_auth 는 회원·세션만, wg_community 는 게시글·신고만
+- * 볼 수 있고 서로의 테이블에는 접근 권한이 없다. 그래서 게시글 작성 한 건이
++ * 롤도 기능별로 나뉜다. wg_auth 는 회원·세션, wg_community 는 게시글·신고,
++ * wg_tip 은 현장 제보만 볼 수 있고 서로의 테이블에는 접근 권한이 없다. 그래서 게시글 작성 한 건이
+  * "인증 연결로 세션 확인 → 커뮤니티 연결로 저장" 두 단계로 나뉘며,
+  * 두 단계를 한 트랜잭션으로 묶을 수 없다.
+  */
+ 
+-export type WriteRole = "auth" | "community";
++export type WriteRole = "auth" | "community" | "tip";
+ 
+ interface RoleSpec {
+   getConnectionString: () => string | undefined;
+@@ -41,6 +42,12 @@ const ROLE_SPECS: Record<WriteRole, RoleSpec> = {
+     notConfiguredCode: "COMMUNITY_DATABASE_NOT_CONFIGURED",
+     notConfiguredMessage: "커뮤니티 데이터베이스 연결 정보가 설정되지 않았습니다.",
+   },
++  tip: {
++    getConnectionString: getTipDatabaseConnectionString,
++    applicationName: "donworry-product-worksite-tip",
++    notConfiguredCode: "WORKSITE_TIP_DATABASE_NOT_CONFIGURED",
++    notConfiguredMessage: "현장 제보 데이터베이스 연결 정보가 설정되지 않았습니다.",
++  },
+ };
+ 
+ const pools = new Map<WriteRole, Pool>();
+@@ -121,16 +128,38 @@ export function assertWriteStatementAllowed(sql: string): void {
+ }
+ 
+ function unavailable(role: WriteRole): ServiceError {
++  const message = role === "auth"
++    ? "사용자 인증 데이터베이스에 접근하지 못했습니다."
++    : role === "community"
++      ? "커뮤니티 데이터베이스에 접근하지 못했습니다."
++      : "현장 제보 데이터베이스에 접근하지 못했습니다.";
+   return new ServiceError(
+     "DATABASE_UNAVAILABLE",
+-    role === "auth"
+-      ? "사용자 인증 데이터베이스에 접근하지 못했습니다."
+-      : "커뮤니티 데이터베이스에 접근하지 못했습니다.",
++    message,
+     503,
+     true,
+   );
+ }
+ 
++function commitOutcomeUnknown(role: WriteRole): ServiceError {
++  const target = role === "auth"
++    ? "사용자 인증"
++    : role === "community"
++      ? "커뮤니티"
++      : "현장 제보";
++  return new ServiceError(
++    "DATABASE_COMMIT_OUTCOME_UNKNOWN",
++    `${target} 데이터베이스의 저장 결과를 확인하지 못했습니다.`,
++    503,
++    true,
++  );
++}
++
++function isCommitOutcomeUncertain(error: unknown): boolean {
++  if (!isDatabaseError(error)) return true;
++  return error.code.startsWith("08") || error.code === "40003";
++}
++
+ /*
+  * 오류 처리 원칙: 연결·인프라 문제만 503으로 바꾸고,
+  * 서버가 SQLSTATE를 붙여 돌려준 오류(제약 위반 등)는 그대로 올려보낸다.
+@@ -192,7 +221,15 @@ export async function withWriteTransaction<T>(
+   try {
+     await client.query("BEGIN");
+     const result = await run(transaction);
+-    await client.query("COMMIT");
++    try {
++      await client.query("COMMIT");
++    } catch (error) {
++      // 연결 예외(08xxx), statement_completion_unknown(40003), 응답 없는 전송
++      // 실패는 실제 반영 여부를 단정할 수 없다. 제약 위반처럼 나머지 SQLSTATE는
++      // 서버가 COMMIT 실패를 확정해 돌려준 것이므로 원문을 유지한다.
++      if (!isCommitOutcomeUncertain(error)) throw error;
++      throw commitOutcomeUnknown(role);
++    }
+     return result;
+   } catch (error) {
+     try {
+diff --git a/product/src/services/userDataProviders.ts b/product/src/services/userDataProviders.ts
+index 603d3db..927ab11 100644
+--- a/product/src/services/userDataProviders.ts
++++ b/product/src/services/userDataProviders.ts
+@@ -2,14 +2,21 @@ import "server-only";
+ 
+ import { MockAuthRepository } from "@/adapters/mock/MockAuthRepository";
+ import { MockCommunityRepository } from "@/adapters/mock/MockCommunityRepository";
++import { MockWorksiteTipRepository } from "@/adapters/mock/MockWorksiteTipRepository";
+ import { RealAuthRepository } from "@/adapters/real/RealAuthRepository";
+ import { RealCommunityRepository } from "@/adapters/real/RealCommunityRepository";
+-import { getAuthDataMode, getCommunityDataMode } from "@/config/dataMode";
++import { RealWorksiteTipRepository } from "@/adapters/real/RealWorksiteTipRepository";
++import {
++  getAuthDataMode,
++  getCommunityDataMode,
++  getWorksiteTipDataMode,
++} from "@/config/dataMode";
+ import type { AuthRepository } from "@/domain/auth";
+ import type { CommunityRepository } from "@/domain/community";
++import type { WorksiteTipRepository } from "@/domain/worksiteTip";
+ 
+ /*
+- * 사용자 데이터(회원·세션·게시글·신고) 저장소 선택.
++ * 사용자 데이터(회원·세션·게시글·신고·현장 제보) 저장소 선택.
+  *
+  * services/providers.ts 와 나눠 둔 이유가 있다. 그쪽은 사업장·위험도·상담처럼
+  * 화면 어디서나 쓰는 공용 조회 어댑터를 모아 두는 곳이고, 이 파일이 다루는
+@@ -21,6 +28,8 @@ const mockAuthRepository = new MockAuthRepository();
+ const realAuthRepository = new RealAuthRepository();
+ const realCommunityRepository = new RealCommunityRepository();
+ const mockCommunityRepository = new MockCommunityRepository();
++const mockWorksiteTipRepository = new MockWorksiteTipRepository();
++const realWorksiteTipRepository = new RealWorksiteTipRepository();
+ 
+ export function getAuthRepository(): AuthRepository {
+   return getAuthDataMode() === "real" ? realAuthRepository : mockAuthRepository;
+@@ -29,3 +38,13 @@ export function getAuthRepository(): AuthRepository {
+ export function getCommunityRepository(): CommunityRepository {
+   return getCommunityDataMode() === "real" ? realCommunityRepository : mockCommunityRepository;
+ }
++
++export function getWorksiteTipRepository(): WorksiteTipRepository {
++  return getWorksiteTipDataMode() === "real"
++    ? realWorksiteTipRepository
++    : mockWorksiteTipRepository;
++}
++
++export function resetMockWorksiteTipsForTests(): void {
++  mockWorksiteTipRepository.resetForTests();
++}

@@ -1,0 +1,457 @@
+diff --git a/product/docs/api-contract.md b/product/docs/api-contract.md
+index a30d09c..8acf7fd 100644
+--- a/product/docs/api-contract.md
++++ b/product/docs/api-contract.md
+@@ -335,6 +335,8 @@ DB·RAG·계약서 분석·LLM은 `ready | configured_unreachable | unavailable`
+ `DEMO_BASIC_AUTH_PASSWORD`를 반드시 설정해 페이지와 `/api/inspector/*` 전체를 Basic 인증으로 보호한다.
+ 
+ - `GET /api/inspector/overview?limit=10&page=1`: 최신 배치 요약, 큐 우선순위별 건수와 최상위 100위 안의 위험큐 페이지를 반환한다. 기본값은 페이지당 10개이며 응답의 `queue_pagination`에 현재 페이지, 전체 페이지, 이전·다음 여부가 포함된다.
++- `GET /api/inspector/batches`: 실제 `public.batches` 전체 이력과 현재 서비스 중인 배치를 읽기 전용으로 반환한다.
++- `GET /api/admin/batches`: 관리자 배치 현황 화면에 같은 실제 `public.batches` 결과를 반환한다. 운영 관리자 역할만 접근할 수 있으며 응답은 저장하지 않는다.
+ - `GET /api/inspector/companies/search?q=...`: 실제 `firms`에서 동명 사업장을 검색한다.
+ - `GET /api/inspector/companies/{companyId}`: 최신 `risk_full`, 큐 순위·`grade`, 실제
+   `reasons`, G1~G6 지표와 별도 산업안전 공표 구간을 반환한다.
+diff --git a/product/src/adapters/mock/MockBatchStatusProvider.ts b/product/src/adapters/mock/MockBatchStatusProvider.ts
+deleted file mode 100644
+index bd13cbe..0000000
+--- a/product/src/adapters/mock/MockBatchStatusProvider.ts
++++ /dev/null
+@@ -1,20 +0,0 @@
+-export const MockBatchStatusProvider = {
+-  getWageBatch: async () => ({
+-    asOf: "2026-06-01",
+-    targetPeriod: "2026-12",
+-    isTargetStale: false,
+-    rowCount: 553598,
+-    validUntil: "2026-07-01",
+-    drift: { status: "정상", errorCount: 0, warningCount: 1, notCheckableCount: 3 },
+-    distribution: { normal: 32613, watch: 431646, review: 22098, unknown: 67241 },
+-  }),
+-  getSafetyBatch: async () => ({
+-    asOf: "2026-04-19",
+-    targetPeriod: "2026-04-20~26",
+-    isTargetStale: true,
+-    rowCount: 515608,
+-    validUntil: null,
+-    drift: { status: "불일치", errorCount: 1, warningCount: 0, notCheckableCount: 2 },
+-    distribution: { top1: 5161, top5: 20739, top10: 25690, general: 464018 },
+-  })
+-};
+\ No newline at end of file
+diff --git a/product/src/app/admin/batches/page.tsx b/product/src/app/admin/batches/page.tsx
+index eee4264..67da655 100644
+--- a/product/src/app/admin/batches/page.tsx
++++ b/product/src/app/admin/batches/page.tsx
+@@ -1,195 +1,20 @@
+-"use client";
++import type { Metadata } from "next";
++import { AdminAccessGate } from "@/components/admin/AdminAccessGate";
++import { BatchStatusPage } from "@/components/inspector/BatchStatusPage";
+ 
+-import { useEffect, useState } from "react";
++export const metadata: Metadata = { title: "ML 배치 현황" };
+ 
+-// --- 타입 정의 ---
+-type DriftStatus = "정상" | "불일치";
+-
+-interface DriftSummary {
+-  status: DriftStatus;
+-  errorCount: number;
+-  warningCount: number;
+-  notCheckableCount: number;
+-}
+-
+-interface WageGradeDistribution {
+-  normal: number;
+-  watch: number;
+-  review: number;
+-  unknown: number;
+-}
+-
+-interface SafetyBandDistribution {
+-  top1: number;
+-  top5: number;
+-  top10: number;
+-  general: number;
+-}
+-
+-interface BatchStatusBase {
+-  asOf: string;
+-  targetPeriod: string;
+-  isTargetStale: boolean;
+-  rowCount: number;
+-  validUntil: string | null;
+-  drift: DriftSummary;
+-}
+-
+-interface WageBatch extends BatchStatusBase {
+-  distribution: WageGradeDistribution;
+-}
+-
+-interface SafetyBatch extends BatchStatusBase {
+-  distribution: SafetyBandDistribution;
+-}
+-
+-// --- 공통 컴포넌트 (순수 인라인 스타일) ---
+-function DriftBadge({ drift }: { drift: DriftSummary }) {
+-  const isOk = drift.status === "정상";
+-  return (
+-    <span style={{
+-      padding: '4px 8px', borderRadius: '4px', fontSize: '0.75rem', fontWeight: 'bold',
+-      backgroundColor: isOk ? '#dcfce7' : '#fee2e2',
+-      color: isOk ? '#15803d' : '#b91c1c'
+-    }}>
+-      {isOk ? "정상" : `불일치 ${drift.errorCount}건`}
+-    </span>
+-  );
+-}
+-
+-function DriftDetail({ drift }: { drift: DriftSummary }) {
+-  return (
+-    <div style={{ borderTop: '1px solid #e5e7eb', paddingTop: '12px', marginTop: '12px', fontSize: '0.75rem' }}>
+-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', color: '#6b7280', marginBottom: '8px' }}>
+-        <span>드리프트 검사 (25항목)</span>
+-        <DriftBadge drift={drift} />
+-      </div>
+-      <div style={{ backgroundColor: '#f9fafb', padding: '12px', borderRadius: '4px', border: '1px solid #f3f4f6', display: 'flex', gap: '16px', color: '#6b7280' }}>
+-        <span>🟡 경고 {drift.warningCount}건</span>
+-        <span>⚪ 검사 불가 {drift.notCheckableCount}건 (통과로 세지 않음)</span>
+-      </div>
+-    </div>
+-  );
+-}
+-
+-function ValidUntilValue({ validUntil }: { validUntil: string | null }) {
+-  if (!validUntil) return <span style={{ fontWeight: '500', color: '#d97706' }}>갱신 확인 필요</span>;
+-  return <span style={{ fontWeight: '500', color: '#2563eb' }}>{validUntil} (다음 배치 예정)</span>;
+-}
+-
+-function GradeBar({ label, pct, barColor, textColor, note }: { label: string; pct: number; barColor: string; textColor: string; note?: string; }) {
++export default function AdminBatchesPage() {
+   return (
+-    <div style={{ marginBottom: '12px' }}>
+-      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.875rem', marginBottom: '4px' }}>
+-        <span style={{ fontWeight: '500', color: textColor }}>
+-          {label} {note && <span style={{ fontSize: '0.75rem', color: '#9ca3af', marginLeft: '4px' }}>({note})</span>}
+-        </span>
+-        <span style={{ color: '#4b5563' }}>{pct.toFixed(2)}%</span>
+-      </div>
+-      <div style={{ width: '100%', backgroundColor: '#e5e7eb', borderRadius: '9999px', height: '8px' }}>
+-        <div style={{ width: `${pct}%`, backgroundColor: barColor, borderRadius: '9999px', height: '8px' }} />
+-      </div>
++    <div className="inspector-page">
++      <AdminAccessGate>
++        <BatchStatusPage
++          endpoint="/api/admin/batches"
++          eyebrow="관리자 · 읽기 전용"
++          title="ML 배치 현황"
++          description="실제 데이터베이스의 서비스 배치와 전체 적재 이력을 확인합니다."
++        />
++      </AdminAccessGate>
+     </div>
+   );
+ }
+-
+-// --- 임금체불 카드 ---
+-function WageBatchCard({ batch }: { batch: WageBatch }) {
+-  const total = batch.distribution.normal + batch.distribution.watch + batch.distribution.review + batch.distribution.unknown;
+-  const pct = (n: number) => (total ? (n / total) * 100 : 0);
+-
+-  return (
+-    <div style={{ backgroundColor: '#ffffff', padding: '24px', borderRadius: '8px', border: '1px solid #e5e7eb', boxShadow: '0 1px 2px 0 rgba(0,0,0,0.05)' }}>
+-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+-        <h2 style={{ fontSize: '1.125rem', fontWeight: '600', margin: 0, color: '#374151' }}>임금체불 배치</h2>
+-        <DriftBadge drift={batch.drift} />
+-      </div>
+-      <ul style={{ listStyle: 'none', padding: 0, margin: '0 0 16px 0', display: 'flex', flexDirection: 'column', gap: '12px', fontSize: '0.875rem' }}>
+-        <li style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#6b7280' }}>기준일 (as_of)</span><span style={{ fontWeight: '500' }}>{batch.asOf}</span></li>
+-        <li style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#6b7280' }}>예측 대상 (target_month)</span><span style={{ fontWeight: '500' }}>{batch.targetPeriod}</span></li>
+-        <li style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#6b7280' }}>적재 행수</span><span style={{ fontWeight: '500' }}>{batch.rowCount.toLocaleString()}곳</span></li>
+-        <li style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#6b7280' }}>유효기간 (valid_until)</span><ValidUntilValue validUntil={batch.validUntil} /></li>
+-      </ul>
+-      <div>
+-        <GradeBar label="Normal" note="뚜렷한 이상 신호 없음" pct={pct(batch.distribution.normal)} barColor="#22c55e" textColor="#16a34a" />
+-        <GradeBar label="Watch" note="안전 신호 미확인 — 회색 고정" pct={pct(batch.distribution.watch)} barColor="#9ca3af" textColor="#6b7280" />
+-        <GradeBar label="Review" note="우선 확인 필요, 누락 금지" pct={pct(batch.distribution.review)} barColor="#ef4444" textColor="#dc2626" />
+-        <GradeBar label="Unknown" note="분석 자료 부족" pct={pct(batch.distribution.unknown)} barColor="#facc15" textColor="#ca8a04" />
+-      </div>
+-      <DriftDetail drift={batch.drift} />
+-    </div>
+-  );
+-}
+-
+-// --- 산업재해 카드 ---
+-function SafetyBatchCard({ batch }: { batch: SafetyBatch }) {
+-  const total = batch.distribution.top1 + batch.distribution.top5 + batch.distribution.top10 + batch.distribution.general;
+-  const pct = (n: number) => (total ? (n / total) * 100 : 0);
+-
+-  return (
+-    <div style={{ backgroundColor: '#ffffff', padding: '24px', borderRadius: '8px', border: '1px solid #e5e7eb', boxShadow: '0 1px 2px 0 rgba(0,0,0,0.05)' }}>
+-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+-        <h2 style={{ fontSize: '1.125rem', fontWeight: '600', margin: 0, color: '#374151' }}>산업재해 배치</h2>
+-        <DriftBadge drift={batch.drift} />
+-      </div>
+-      <ul style={{ listStyle: 'none', padding: 0, margin: '0 0 16px 0', display: 'flex', flexDirection: 'column', gap: '12px', fontSize: '0.875rem' }}>
+-        <li style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#6b7280' }}>기준일 (as_of)</span><span style={{ fontWeight: '500' }}>{batch.asOf}</span></li>
+-        <li style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+-          <span style={{ color: '#6b7280' }}>예측 대상 (target_week)</span>
+-          <span style={{ fontWeight: '500' }}>{batch.targetPeriod}{batch.isTargetStale && <span style={{ color: '#d97706', fontSize: '0.75rem', marginLeft: '4px' }}>(기간 지남)</span>}</span>
+-        </li>
+-        <li style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#6b7280' }}>적재 행수</span><span style={{ fontWeight: '500' }}>{batch.rowCount.toLocaleString()}곳</span></li>
+-        <li style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#6b7280' }}>유효기간 (valid_until)</span><ValidUntilValue validUntil={batch.validUntil} /></li>
+-      </ul>
+-      <p style={{ fontSize: '0.75rem', color: '#9ca3af', marginBottom: '12px', marginTop: 0 }}>밴드 기준은 전국 전체입니다. 지역·업종으로 필터링해도 재계산되지 않습니다.</p>
+-      <div>
+-        <GradeBar label="상위 1%" pct={pct(batch.distribution.top1)} barColor="#b91c1c" textColor="#b91c1c" />
+-        <GradeBar label="상위 5%" note="1~5% 구간" pct={pct(batch.distribution.top5)} barColor="#ef4444" textColor="#dc2626" />
+-        <GradeBar label="상위 10%" note="5~10% 구간" pct={pct(batch.distribution.top10)} barColor="#fca5a5" textColor="#ef4444" />
+-        <GradeBar label="일반" pct={pct(batch.distribution.general)} barColor="#9ca3af" textColor="#6b7280" />
+-      </div>
+-      <DriftDetail drift={batch.drift} />
+-    </div>
+-  );
+-}
+-
+-// --- 메인 페이지 ---
+-export default function MLBatchDashboard() {
+-  const [wageBatch, setWageBatch] = useState<WageBatch | null>(null);
+-  const [safetyBatch, setSafetyBatch] = useState<SafetyBatch | null>(null);
+-  const [loading, setLoading] = useState(true);
+-
+-  useEffect(() => {
+-    // 우리가 방금 만든 로컬 가짜 데이터 API 호출
+-    fetch("/api/admin/batches")
+-      .then((r) => r.json())
+-      .then((data) => {
+-        setWageBatch(data.wage);
+-        setSafetyBatch(data.safety);
+-      })
+-      .catch((e) => console.error(e))
+-      .finally(() => setLoading(false));
+-  }, []);
+-
+-  return (
+-    <div style={{ padding: '24px', maxWidth: '1024px', margin: '0 auto', backgroundColor: '#f9fafb', minHeight: '100vh', fontFamily: 'sans-serif' }}>
+-      <h1 style={{ fontSize: '1.5rem', fontWeight: 'bold', marginBottom: '24px', color: '#1f2937' }}>📊 ML 배치 현황</h1>
+-      {loading ? (
+-        <p style={{ color: '#6b7280' }}>데이터를 불러오는 중…</p>
+-      ) : (
+-        <>
+-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(400px, 1fr))', gap: '24px' }}>
+-            {wageBatch && <WageBatchCard batch={wageBatch} />}
+-            {safetyBatch && <SafetyBatchCard batch={safetyBatch} />}
+-          </div>
+-          <p style={{ fontSize: '0.75rem', color: '#9ca3af', marginTop: '16px', textAlign: 'center' }}>
+-            두 배치는 분모·시간 단위·등급 체계가 달라 항상 별도 카드로 표시하고 합산하지 않습니다.
+-          </p>
+-          <p style={{ fontSize: '0.75rem', color: '#9ca3af', marginTop: '8px', textAlign: 'center' }}>
+-            * 드리프트 검사 시 as_of의 실제 의미 일치 여부 등은 파일 밖 정보이므로 검사 대상에서 제외됩니다 (⚪ 미검사).
+-          </p>
+-        </>
+-      )}
+-    </div>
+-  );
+-}
+\ No newline at end of file
+diff --git a/product/src/app/api/admin/batches/route.ts b/product/src/app/api/admin/batches/route.ts
+index 2e34496..ed66d6e 100644
+--- a/product/src/app/api/admin/batches/route.ts
++++ b/product/src/app/api/admin/batches/route.ts
+@@ -1,11 +1,20 @@
+ import { NextResponse } from "next/server";
+-import { batchStatusService } from "@/services/batchStatusService";
++import { getOptionalSessionUser } from "@/services/authService";
++import { listBatchStatuses } from "@/services/batchService";
++import { noStoreError, noStoreJson } from "@/server/auth/http";
++import { requireAuthenticatedUser, requireUserRole } from "@/server/auth/permissions";
++import { getSessionTokenFromRequest } from "@/server/auth/sessionCookie";
+ 
+-export async function GET() {
++export const dynamic = "force-dynamic";
++
++export async function GET(request: Request): Promise<NextResponse> {
+   try {
+-    const data = await batchStatusService.getBatches();
+-    return NextResponse.json(data);
++    const user = requireAuthenticatedUser(
++      await getOptionalSessionUser(getSessionTokenFromRequest(request)),
++    );
++    requireUserRole(user, ["admin"]);
++    return noStoreJson(await listBatchStatuses());
+   } catch (error) {
+-    return NextResponse.json({ error: "데이터를 불러오지 못했습니다." }, { status: 500 });
++    return noStoreError(error);
+   }
+-}
+\ No newline at end of file
++}
+diff --git a/product/src/components/inspector/BatchStatusPage.tsx b/product/src/components/inspector/BatchStatusPage.tsx
+index 628d7d6..2f487e9 100644
+--- a/product/src/components/inspector/BatchStatusPage.tsx
++++ b/product/src/components/inspector/BatchStatusPage.tsx
+@@ -4,8 +4,8 @@ import { useEffect, useState } from "react";
+ import type { BatchStatus, BatchStatusListResponse } from "@/domain/batch";
+ import { readApiResponse } from "@/utils/clientApi";
+ 
+-function dateLabel(value: string | null): string {
+-  if (!value) return "미확정";
++function dateLabel(value: string | null, fallback = "미확정"): string {
++  if (!value) return fallback;
+   return value.slice(0, 7).replace("-", ".");
+ }
+ 
+@@ -13,14 +13,26 @@ function timestampLabel(value: string): string {
+   return new Date(value).toLocaleString("ko-KR");
+ }
+ 
+-export function BatchStatusPage() {
++interface BatchStatusPageProps {
++  endpoint?: string;
++  eyebrow?: string;
++  title?: string;
++  description?: string;
++}
++
++export function BatchStatusPage({
++  endpoint = "/api/inspector/batches",
++  eyebrow = "ML 운영 상태",
++  title = "배치 현황",
++  description = "서비스가 참조하는 ML 배치와 과거 적재 이력을 확인합니다.",
++}: BatchStatusPageProps = {}) {
+   const [batches, setBatches] = useState<BatchStatus[]>([]);
+   const [loading, setLoading] = useState(true);
+   const [error, setError] = useState<string | null>(null);
+ 
+   useEffect(() => {
+     const controller = new AbortController();
+-    fetch("/api/inspector/batches", { signal: controller.signal, cache: "no-store" })
++    fetch(endpoint, { signal: controller.signal, cache: "no-store" })
+       .then((response) => readApiResponse<BatchStatusListResponse>(response))
+       .then((result) => setBatches(result.batches))
+       .catch((caught: unknown) => {
+@@ -31,15 +43,15 @@ export function BatchStatusPage() {
+         if (!controller.signal.aborted) setLoading(false);
+       });
+     return () => controller.abort();
+-  }, []);
++  }, [endpoint]);
+ 
+   return (
+     <main className="shell inspector-content batch-status-page">
+       <div className="inspector-page-heading">
+         <div>
+-          <span className="eyebrow">ML 운영 상태</span>
+-          <h1>배치 현황</h1>
+-          <p>서비스가 참조하는 ML 배치와 과거 적재 이력을 확인합니다.</p>
++          <span className="eyebrow">{eyebrow}</span>
++          <h1>{title}</h1>
++          <p>{description}</p>
+         </div>
+         <span className="inspector-private-badge">DB 변경 없음</span>
+       </div>
+@@ -51,7 +63,7 @@ export function BatchStatusPage() {
+           <div className="batch-table-scroll">
+             <table className="batch-status-table">
+               <thead><tr><th>상태</th><th>배치 ID</th><th>기준월</th><th>예측 대상월</th><th>모델 버전</th><th>적재 시각</th><th>규모</th></tr></thead>
+-              <tbody>{batches.map((batch) => <tr key={batch.batch_id} className={batch.is_active ? "is-active" : undefined}><td><span className={`batch-status-pill ${batch.is_active ? "is-active" : "is-archived"}`}>{batch.is_active ? "서비스 중" : "과거 배치"}</span></td><td>{batch.batch_id}</td><td>{dateLabel(batch.data_as_of)}</td><td>{dateLabel(batch.target_month)}</td><td>{batch.model_version}</td><td>{timestampLabel(batch.ingested_at)}</td><td><span>채점 {batch.n_scored.toLocaleString("ko-KR")}</span><span>위험큐 {batch.n_queue.toLocaleString("ko-KR")}</span><span>안정판정 {batch.n_safe.toLocaleString("ko-KR")}</span></td></tr>)}</tbody>
++              <tbody>{batches.map((batch) => <tr key={batch.batch_id} className={batch.is_active ? "is-active" : undefined}><td><span className={`batch-status-pill ${batch.is_active ? "is-active" : "is-archived"}`}>{batch.is_active ? "서비스 중" : batch.data_as_of ? "과거 배치" : "후보 제외"}</span></td><td>{batch.batch_id}</td><td>{dateLabel(batch.data_as_of, "기준월 미확정")}</td><td>{dateLabel(batch.target_month)}</td><td>{batch.model_version}{batch.model_sha ? <span>sha {batch.model_sha.slice(0, 8)}</span> : null}</td><td>{timestampLabel(batch.ingested_at)}</td><td><span>채점 {batch.n_scored.toLocaleString("ko-KR")}</span><span>위험큐 {batch.n_queue.toLocaleString("ko-KR")}</span><span>안정판정 {batch.n_safe.toLocaleString("ko-KR")}</span></td></tr>)}</tbody>
+             </table>
+           </div>
+           <p className="batch-table-note">서비스 중 표시는 기준월·적재 시각·배치 ID의 결정적 정렬 결과 가장 최신인 한 건에만 부여됩니다.</p>
+diff --git a/product/src/domain/batch.ts b/product/src/domain/batch.ts
+index f71fa80..324005f 100644
+--- a/product/src/domain/batch.ts
++++ b/product/src/domain/batch.ts
+@@ -3,7 +3,9 @@ export interface BatchStatus {
+   data_as_of: string | null;
+   target_month: string | null;
+   model_version: string;
++  model_sha: string | null;
+   ingested_at: string;
++  source: string | null;
+   n_scored: number;
+   n_queue: number;
+   n_safe: number;
+@@ -11,5 +13,8 @@ export interface BatchStatus {
+ }
+ 
+ export interface BatchStatusListResponse {
++  selection_mode: "auto";
++  current: BatchStatus | null;
+   batches: BatchStatus[];
++  generated_at: string;
+ }
+diff --git a/product/src/services/batchService.ts b/product/src/services/batchService.ts
+index ac86e33..6a41644 100644
+--- a/product/src/services/batchService.ts
++++ b/product/src/services/batchService.ts
+@@ -2,26 +2,33 @@ import type { BatchStatus, BatchStatusListResponse } from "@/domain/batch";
+ import { LATEST_BATCH_ORDER_SQL } from "@/server/latestBatchSql";
+ import { queryReadOnly } from "@/server/postgres";
+ 
+-type BatchRow = Omit<BatchStatus, "is_active">;
+-
+ export async function listBatchStatuses(): Promise<BatchStatusListResponse> {
+-  const rows = await queryReadOnly<BatchRow>(
+-    `SELECT id AS batch_id,
+-            as_of_date::text AS data_as_of,
+-            target_month::text,
+-            model_version,
+-            ingested_at::text,
+-            n_scored,
+-            n_queue,
+-            n_safe
+-       FROM public.batches
+-      ${LATEST_BATCH_ORDER_SQL.replace("LIMIT 1", "")}`,
++  const rows = await queryReadOnly<BatchStatus>(
++    `WITH current_batch AS (
++       SELECT id
++         FROM public.batches
++        ${LATEST_BATCH_ORDER_SQL}
++     )
++     SELECT b.id AS batch_id,
++            b.as_of_date::text AS data_as_of,
++            b.target_month::text,
++            b.model_version,
++            b.model_sha,
++            b.ingested_at::text,
++            b.source,
++            b.n_scored,
++            b.n_queue,
++            b.n_safe,
++            COALESCE(b.id = current_batch.id, false) AS is_active
++       FROM public.batches b
++       LEFT JOIN current_batch ON true
++      ORDER BY b.as_of_date DESC NULLS LAST, b.ingested_at DESC, b.id DESC`,
+   );
+-  const activeBatchId = rows[0]?.batch_id ?? null;
++
+   return {
+-    batches: rows.map((row) => ({
+-      ...row,
+-      is_active: row.batch_id === activeBatchId,
+-    })),
++    selection_mode: "auto",
++    current: rows.find((row) => row.is_active) ?? null,
++    batches: rows,
++    generated_at: new Date().toISOString(),
+   };
+ }
+diff --git a/product/src/services/batchStatusService.ts b/product/src/services/batchStatusService.ts
+deleted file mode 100644
+index e28a2e3..0000000
+--- a/product/src/services/batchStatusService.ts
++++ /dev/null
+@@ -1,11 +0,0 @@
+-import { MockBatchStatusProvider } from "../adapters/mock/MockBatchStatusProvider";
+-
+-export const batchStatusService = {
+-  getBatches: async () => {
+-    // TODO: 관리자 권한 검사(민규)
+-    const wage = await MockBatchStatusProvider.getWageBatch();
+-    const safety = await MockBatchStatusProvider.getSafetyBatch();
+-    
+-    return { wage, safety };
+-  }
+-};
+\ No newline at end of file
